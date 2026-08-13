@@ -12,12 +12,12 @@ from __future__ import annotations
 import sys
 from typing import Annotated
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from pydantic import Field
 
 from kwin_mcp.core import AutomationEngine
 
-mcp = FastMCP("kwin-mcp")
+mcp = MCPServer("kwin-mcp")
 _engine = AutomationEngine()
 
 # Detect --default-live-session flag early (before MCP framework consumes args)
