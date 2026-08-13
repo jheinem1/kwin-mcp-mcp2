@@ -7,7 +7,7 @@
     "url": "https://github.com/isac322"
   },
   "metadata": {
-    "description": "kwin-mcp marketplace \u2014 MCP server and skill for Linux KDE Plasma 6 Wayland desktop GUI automation (virtual sessions for headless testing, live sessions for real-desktop / container / kiosk control).",
+    "description": "kwin-mcp marketplace — MCP server and skill for Linux KDE Plasma 6 Wayland desktop GUI automation (virtual sessions for headless testing, live sessions for real-desktop / container / kiosk control).",
     "version": "0.7.0+mcp2"
   },
   "plugins": [
