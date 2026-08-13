@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import time
 from enum import Enum
+from typing import Any
 
 import dbus
 from dbus.mainloop.glib import DBusGMainLoop
@@ -218,8 +219,19 @@ def _load_libei() -> ctypes.CDLL:
     return lib
 
 
-# Module-level libei instance (loaded once)
-_libei = _load_libei()
+class _LazyLibEI:
+    """Load libei only when input injection is requested."""
+
+    def __init__(self) -> None:
+        self._library: ctypes.CDLL | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        if self._library is None:
+            self._library = _load_libei()
+        return getattr(self._library, name)
+
+
+_libei = _LazyLibEI()
 
 
 class EISClient:
@@ -241,7 +253,11 @@ class EISClient:
         self._eis_iface: dbus.Interface | None = None
         self._next_touch_id: int = 0  # auto-increment touch ID
         self._active_touches: dict[int, int] = {}  # touch_id -> ctypes pointer
-        self._setup()
+        try:
+            self._setup()
+        except Exception:
+            self.close()
+            raise
 
     def _setup(self) -> None:
         """Connect to KWin EIS and negotiate devices."""
@@ -465,14 +481,15 @@ class EISClient:
             _libei.ei_device_stop_emulating(self._touch_device)
             _libei.ei_device_unref(self._touch_device)
             self._touch_device = 0
-        if self._pointer:
-            _libei.ei_device_stop_emulating(self._pointer)
-            _libei.ei_device_unref(self._pointer)
+        pointer = self._pointer
+        if pointer:
+            _libei.ei_device_stop_emulating(pointer)
+            _libei.ei_device_unref(pointer)
             self._pointer = 0
-        if self._keyboard and self._keyboard != self._pointer:
+        if self._keyboard and self._keyboard != pointer:
             _libei.ei_device_stop_emulating(self._keyboard)
             _libei.ei_device_unref(self._keyboard)
-            self._keyboard = 0
+        self._keyboard = 0
 
         if self._eis_iface and self._cookie:
             with contextlib.suppress(dbus.DBusException):
@@ -684,12 +701,16 @@ class InputBackend:
 
     def keyboard_type(self, text: str) -> None:
         """Type a string of text character by character."""
-        for char in text:
-            entry = _CHAR_KEY_MAP.get(char)
-            if entry is None:
-                continue
+        unsupported = [
+            (index, char) for index, char in enumerate(text) if char not in _CHAR_KEY_MAP
+        ]
+        if unsupported:
+            index, char = unsupported[0]
+            msg = f"Unsupported character at index {index}: {char!r}; use keyboard_type_unicode"
+            raise ValueError(msg)
 
-            keycode, needs_shift = entry
+        for char in text:
+            keycode, needs_shift = _CHAR_KEY_MAP[char]
             if needs_shift:
                 self._client.keyboard_key(_MODIFIER_KEYS["shift"], _PRESSED)
                 time.sleep(0.01)
@@ -711,7 +732,8 @@ class InputBackend:
         """
         modifiers, keycode = _parse_key_combo(key)
         if keycode is None:
-            return
+            msg = f"Unsupported key combination: {key!r}"
+            raise ValueError(msg)
 
         # Press modifiers
         for mod in modifiers:
@@ -885,20 +907,16 @@ class InputBackend:
         for tid in tids:
             self._client.touch_up(tid)
 
-    def keyboard_type_unicode(self, text: str, dbus_address: str | None = None) -> bool:
+    def keyboard_type_unicode(self, text: str, env: dict[str, str]) -> bool:
         """Type arbitrary Unicode text using wtype or clipboard fallback.
 
         Args:
             text: Text to type (supports non-ASCII, e.g. Korean, CJK).
-            dbus_address: D-Bus address for the session (needed for wl-copy fallback).
+            env: Environment containing the target Wayland display and session bus.
 
         Returns:
             True if text was typed successfully.
         """
-        env = dict(__import__("os").environ)
-        if dbus_address:
-            env["DBUS_SESSION_BUS_ADDRESS"] = dbus_address
-
         # Try wtype first
         if shutil.which("wtype"):
             result = subprocess.run(
@@ -909,20 +927,32 @@ class InputBackend:
             )
             return result.returncode == 0
 
-        # Fallback: clipboard paste via wl-copy + Ctrl+V
-        # Use Popen + DEVNULL to avoid pipe-blocking from wl-copy's forked child
+        # Fallback: serve one clipboard request, paste it, then reap wl-copy.
         if shutil.which("wl-copy"):
             cp = subprocess.Popen(
-                ["wl-copy", "--", text],
+                ["wl-copy", "--foreground", "--paste-once"],
                 env=env,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            if cp.stdin is None:
+                cp.kill()
+                return False
+            cp.stdin.write(text.encode())
+            cp.stdin.close()
             time.sleep(0.1)  # Wait for fork to complete
-            if cp.poll() is None or cp.returncode == 0:
+            if cp.poll() is None:
                 self.keyboard_key("ctrl+v")
-                return True
+                try:
+                    return cp.wait(timeout=2) == 0
+                except subprocess.TimeoutExpired:
+                    cp.terminate()
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        cp.wait(timeout=1)
+                    if cp.poll() is None:
+                        cp.kill()
+                        cp.wait()
 
         return False
 

@@ -116,7 +116,7 @@ def session_connect(
     Only use when explicitly asked to interact with a real/existing desktop session.
     For normal GUI automation, use session_start instead (creates an isolated virtual session).
     This connects to a KWin compositor that is already running. Clipboard is always available.
-    Input injection uses KWin EIS when possible, with ydotool as fallback.
+    Input injection uses KWin's private EIS interface when available.
     """
     return _engine.session_connect(
         dbus_address=dbus_address,
@@ -826,8 +826,7 @@ def _apply_live_session_mode() -> None:
         tools["session_connect"].description = (
             "Connect to an existing KWin session (e.g. the real desktop or a container). "
             "This is the default session tool. Connects to a KWin compositor that is already "
-            "running. Clipboard is always available. Input injection uses KWin EIS when "
-            "possible, with ydotool as fallback."
+            "running. Clipboard is always available. Input injection uses KWin EIS."
         )
 
 
