@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import contextlib
 import os
+import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -17,6 +19,25 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import BinaryIO
+
+_STARTUP_TIMEOUT_SECONDS = 15.0
+_AT_SPI_LAUNCHER_CANDIDATES = (
+    "/usr/libexec/at-spi-bus-launcher",  # Fedora/Bazzite
+    "/usr/lib/at-spi-bus-launcher",  # Arch/Debian variants
+)
+
+
+def _find_at_spi_bus_launcher() -> str:
+    """Return the installed AT-SPI bus launcher path."""
+    launcher = shutil.which("at-spi-bus-launcher")
+    if launcher:
+        return launcher
+    for candidate in _AT_SPI_LAUNCHER_CANDIDATES:
+        if Path(candidate).is_file():
+            return candidate
+    msg = "at-spi-bus-launcher not found; install at-spi2-core"
+    raise RuntimeError(msg)
 
 
 class SessionType(Enum):
@@ -80,6 +101,7 @@ class Session:
         self._app_counter: int = 0
         self._config: SessionConfig | None = None
         self._home_dir: Path | None = None
+        self._startup_log: BinaryIO | None = None
 
     @property
     def is_running(self) -> bool:
@@ -120,6 +142,7 @@ class Session:
         if config is None:
             config = SessionConfig()
         self._config = config
+        at_spi_launcher = _find_at_spi_bus_launcher()
 
         self._socket_name = config.socket_name or f"wayland-mcp-{os.getpid()}-{int(time.time())}"
 
@@ -142,13 +165,14 @@ class Session:
             path.unlink(missing_ok=True)
 
         # Build the wrapper script that runs inside dbus-run-session
-        wrapper_script = self._build_wrapper_script(config)
+        wrapper_script = self._build_wrapper_script(config, at_spi_launcher)
 
         # Start the isolated session in its own process group
+        self._startup_log = tempfile.TemporaryFile()  # noqa: SIM115 - closed by stop()
         self._process = subprocess.Popen(
             ["dbus-run-session", "bash", "-c", wrapper_script],
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=self._startup_log,
             env=self._build_env(config),
             start_new_session=True,
         )
@@ -159,10 +183,15 @@ class Session:
         dbus_address = ""
         got_ready = False
         if self._process.stdout:
-            while True:
-                line = self._process.stdout.readline().decode().strip()
-                if not line and self._process.poll() is not None:
+            deadline = time.monotonic() + _STARTUP_TIMEOUT_SECONDS
+            while time.monotonic() < deadline:
+                if self._process.poll() is not None:
                     break
+                remaining = max(0.0, deadline - time.monotonic())
+                readable, _, _ = select.select([self._process.stdout], [], [], min(0.2, remaining))
+                if not readable:
+                    continue
+                line = self._process.stdout.readline().decode().strip()
                 if line.startswith("DBUS_SESSION_BUS_ADDRESS="):
                     dbus_address = line.split("=", 1)[1]
                 elif line == "READY":
@@ -172,16 +201,15 @@ class Session:
         # Wait for kwin to be ready (socket file appears)
         socket_path = Path(runtime_dir) / self._socket_name
         if not self._wait_for_socket(socket_path, timeout=10.0):
+            stderr = self._read_startup_log()
             self.stop()
-            stderr = ""
-            if self._process and self._process.stderr:
-                stderr = self._process.stderr.read().decode(errors="replace")
             msg = f"KWin failed to start. stderr: {stderr}"
             raise RuntimeError(msg)
 
         if not got_ready:
+            stderr = self._read_startup_log()
             self.stop()
-            msg = "Session setup failed: did not receive READY signal"
+            msg = f"Session setup failed: did not receive READY signal. stderr: {stderr}"
             raise RuntimeError(msg)
 
         if self._home_dir is not None:
@@ -327,23 +355,35 @@ class Session:
         self._process = None
         self._info = None
         self._home_dir = None
+        if self._startup_log is not None:
+            self._startup_log.close()
+            self._startup_log = None
 
-    def _build_wrapper_script(self, config: SessionConfig) -> str:
+    def _read_startup_log(self) -> str:
+        """Read the compositor startup log without blocking."""
+        if self._startup_log is None:
+            return ""
+        self._startup_log.flush()
+        self._startup_log.seek(0)
+        return self._startup_log.read().decode(errors="replace").strip()
+
+    def _build_wrapper_script(self, config: SessionConfig, at_spi_launcher: str) -> str:
         """Build the bash script that runs inside dbus-run-session."""
+        launcher = shlex.quote(at_spi_launcher)
         return f"""\
 echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
 
 # Ensure all child processes are cleaned up on exit
 cleanup() {{
-    kill $KWIN_PID $AT_SPI_PID 2>/dev/null
-    wait $KWIN_PID $AT_SPI_PID 2>/dev/null
+    kill ${{KWIN_PID:-}} ${{AT_SPI_PID:-}} 2>/dev/null
+    wait ${{KWIN_PID:-}} ${{AT_SPI_PID:-}} 2>/dev/null
 }}
 trap cleanup EXIT TERM INT HUP
 
 # Start the AT-SPI accessibility bus.
 # ATSPI_DBUS_IMPLEMENTATION is set in _build_env() to force dbus-daemon
 # instead of dbus-broker (which reuses the host's AT-SPI bus).
-/usr/lib/at-spi-bus-launcher --launch-immediately &
+{launcher} --launch-immediately &
 AT_SPI_PID=$!
 sleep 0.2
 
@@ -368,7 +408,19 @@ env -u WAYLAND_DISPLAY -u QT_QPA_PLATFORM \
 KWIN_PID=$!
 
 # Wait for KWin socket to appear
-while [ ! -e "$XDG_RUNTIME_DIR/{self._socket_name}" ]; do sleep 0.1; done
+attempt=0
+while [ ! -e "$XDG_RUNTIME_DIR/{self._socket_name}" ]; do
+    if ! kill -0 "$KWIN_PID" 2>/dev/null; then
+        wait "$KWIN_PID"
+        exit $?
+    fi
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 150 ]; then
+        echo "Timed out waiting for KWin socket" >&2
+        exit 1
+    fi
+    sleep 0.1
+done
 sleep 0.3
 
 # Signal parent that setup is complete
@@ -540,6 +592,11 @@ class LiveSession:
                 app.process.terminate()
             with contextlib.suppress(subprocess.TimeoutExpired):
                 app.process.wait(timeout=3)
+            if app.process.poll() is None:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    app.process.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    app.process.wait(timeout=3)
 
         if not keep_screenshots and self._info.screenshot_dir.exists():
             shutil.rmtree(self._info.screenshot_dir, ignore_errors=True)
