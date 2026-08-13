@@ -207,7 +207,8 @@ def _capture_frame_burst_dbus(
         zip(sorted_delays, raw_frames, strict=True)
     ):
         if not data:
-            continue
+            msg = f"KWin ScreenShot2 returned no data for frame at {delay_ms}ms"
+            raise RuntimeError(msg)
         frame_path = output_dir / f"frame_{uuid.uuid4().hex[:8]}_{i:03d}_{delay_ms}ms.png"
         img = Image.frombytes("RGBA", (width, height), data, "raw", "BGRA", stride)
         img.save(frame_path, "PNG")

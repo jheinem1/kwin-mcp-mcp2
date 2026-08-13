@@ -412,7 +412,7 @@ This section governs how the agent treats `integrations/*` (Claude Code plugin, 
 
 3. **SKILL identity rule**: `integrations/claude-code/skills/kwin-desktop-automation/SKILL.md` is the source of truth. `integrations/opencode/plugin/skill/kwin-desktop-automation/SKILL.md` must be byte-identical. The OpenCode plugin's `npm run build` automatically mirrors the source via its `build:skill` script; CI enforces equality via `check_docs_seo.py::check_skill_identical`.
 
-4. **Tool count consistency**: when `src/kwin_mcp/server.py` changes the `@mcp.tool()` count, all of `.claude/positioning.yml § product.tool_count`, `.claude/positioning.yml § drift_detection.tool_count_canonical`, `check_docs_seo.py § TOOL_COUNT_CANONICAL`, README tool tables, and the SKILL.md "30 capabilities" reference must update together.
+4. **Tool count consistency**: when `src/kwin_mcp/server.py` changes the `@mcp.tool` count, update `.claude/positioning.yml § product.tool_count`, `.claude/positioning.yml § drift_detection.tool_count_canonical`, `check_docs_seo.py § TOOL_COUNT_CANONICAL`, and any documented totals.
 
 ### Output Targets per Trigger
 

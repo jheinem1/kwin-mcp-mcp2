@@ -26,6 +26,27 @@ _AT_SPI_LAUNCHER_CANDIDATES = (
     "/usr/libexec/at-spi-bus-launcher",  # Fedora/Bazzite
     "/usr/lib/at-spi-bus-launcher",  # Arch/Debian variants
 )
+_SAFE_ENV_NAMES = {
+    "HOME",
+    "LANG",
+    "LANGUAGE",
+    "LOGNAME",
+    "PATH",
+    "SHELL",
+    "TERM",
+    "TZ",
+    "USER",
+}
+_SAFE_ENV_PREFIXES = ("GTK_", "KDE_", "LC_", "QT_", "XDG_")
+
+
+def _sanitized_environment() -> dict[str, str]:
+    """Copy desktop/runtime settings without ambient credential variables."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in _SAFE_ENV_NAMES or key.startswith(_SAFE_ENV_PREFIXES)
+    }
 
 
 def _find_at_spi_bus_launcher() -> str:
@@ -236,7 +257,7 @@ class Session:
             raise RuntimeError(msg)
 
         env = {
-            **os.environ,
+            **_sanitized_environment(),
             "WAYLAND_DISPLAY": self._socket_name,
             "QT_QPA_PLATFORM": "wayland",
             "QT_LINUX_ACCESSIBILITY_ALWAYS_ON": "1",
@@ -433,7 +454,7 @@ wait $KWIN_PID
     def _build_env(self, config: SessionConfig) -> dict[str, str]:
         """Build the environment for the isolated session."""
         env = {
-            **os.environ,
+            **_sanitized_environment(),
             "KDE_FULL_SESSION": "true",
             "KDE_SESSION_VERSION": "6",
             "XDG_SESSION_TYPE": "wayland",
@@ -525,7 +546,7 @@ class LiveSession:
             raise RuntimeError(msg)
 
         env = {
-            **os.environ,
+            **_sanitized_environment(),
             "WAYLAND_DISPLAY": self._info.wayland_socket,
             "QT_QPA_PLATFORM": "wayland",
             "QT_LINUX_ACCESSIBILITY_ALWAYS_ON": "1",

@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/isac322/kwin-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/isac322/kwin-mcp/actions/workflows/ci.yml)
 
-A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that enables AI agents (Claude Code, Cursor, and other MCP clients) to launch, interact with, and observe any Wayland application in a fully isolated virtual KWin session -- without affecting the user's desktop. It also supports **live desktop automation** by connecting to an existing KWin session (real desktop or container) for collaborative workflows. With 30 MCP tools covering mouse, keyboard, touch, clipboard, accessibility tree inspection, screenshot capture, and window management, kwin-mcp provides everything needed for end-to-end GUI testing and desktop automation on Linux.
+A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that lets AI agents launch, interact with, and observe Wayland applications in a private virtual KWin display. It also supports **live desktop automation** by connecting to an existing KWin session. The virtual mode isolates the display and session bus; it is not a filesystem or process security sandbox.
 
 ## Table of Contents
 
@@ -26,11 +26,11 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that e
 
 ## Why kwin-mcp?
 
-- **Isolated sessions** -- Each session runs in its own `dbus-run-session` + `kwin_wayland --virtual` sandbox. Your host desktop is never affected.
+- **Private displays** -- Each virtual session uses its own `dbus-run-session` and `kwin_wayland --virtual` display. Ambient credential variables are not inherited. Use `isolate_home=true` to separate normal HOME/XDG configuration.
 - **Live session support** -- Connect to a real KDE Plasma desktop or a KWin instance inside a container (e.g. `systemd-nspawn`) for collaborative "share my screen" workflows.
 - **No screenshots required for interaction** -- The AT-SPI2 accessibility tree gives the AI agent structured widget data (roles, names, coordinates, states, available actions), so it can interact with UI elements without relying solely on vision.
-- **Zero authorization prompts** -- Uses KWin's private EIS (Emulated Input Server) D-Bus interface directly, bypassing the XDG RemoteDesktop portal. No user confirmation dialogs.
-- **Works with any Wayland app** -- Anything that runs on KDE Plasma 6 Wayland works: Qt, GTK, Electron, and more. Input is injected via the standard `libei` protocol.
+- **Direct virtual-session input** -- Uses KWin's private EIS D-Bus interface instead of the RemoteDesktop portal. Live mode therefore grants broad control and should be enabled deliberately.
+- **Broad Wayland support** -- Qt, GTK and Electron applications can be driven through libei, with accessibility coverage varying by toolkit and application.
 - **Full input coverage** -- Mouse, keyboard, multi-touch, and clipboard -- all injected through the isolated session for complete desktop automation.
 
 ## Use Cases
@@ -41,7 +41,7 @@ Run end-to-end GUI tests for KDE/Qt/GTK applications in headless isolated sessio
 
 ### AI-Driven Desktop Automation
 
-Let AI agents like Claude Code autonomously operate desktop applications. The agent reads the accessibility tree to understand the UI, performs actions through 30 MCP tools, and observes the results via screenshots -- creating a complete feedback loop for any Wayland application.
+Let AI agents operate desktop applications through semantic AT-SPI actions, libei input, and screenshot verification.
 
 ### Live Desktop Collaboration
 
@@ -183,17 +183,18 @@ kwin-mcp-cli --default-live-session
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `session_start` | `app_command?` `str`, `screen_width?` `int` (1920), `screen_height?` `int` (1080), `enable_clipboard?` `bool` (false), `keep_screenshots?` `bool` (false), `isolate_home?` `bool` (false), `keep_home?` `bool` (false), `env?` `dict` | Start an isolated KWin Wayland session, optionally launching an app. Set `enable_clipboard=true` to enable clipboard tools (requires `wl-clipboard`). Set `keep_screenshots=true` to preserve screenshot files after `session_stop`. Set `isolate_home=true` to create a temporary HOME with isolated XDG directories (config, data, cache, state), preventing apps from reading/writing host user settings. Set `keep_home=true` to preserve the isolated home directory after `session_stop`. Pass extra environment variables via `env`. |
+| `session_start` | `app_command?` `str`, `screen_width?` `int` (1920), `screen_height?` `int` (1080), `enable_clipboard?` `bool` (false), `keep_screenshots?` `bool` (false), `isolate_home?` `bool` (false), `keep_home?` `bool` (false), `env?` `dict` | Start a private virtual KWin display. HOME isolation is optional and is not a filesystem sandbox. |
 | `session_connect` | `dbus_address?` `str`, `wayland_display?` `str`, `keep_screenshots?` `bool` (false) | Connect to an existing KWin session (real desktop or container). Defaults to `$DBUS_SESSION_BUS_ADDRESS` and `$WAYLAND_DISPLAY`. Clipboard is always enabled. `session_stop` only disconnects without killing KWin or pre-existing apps. |
 | `session_stop` | _(none)_ | Stop the session and clean up. For virtual sessions: terminates KWin and all apps. For live sessions: disconnects without killing KWin or pre-existing apps. |
 
-### Observation (3 tools)
+### Observation and semantic action (4 tools)
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `screenshot` | `include_cursor?` `bool` (false) | Capture a screenshot of the virtual display (saved as PNG, returns file path) |
-| `accessibility_tree` | `app_name?` `str`, `max_depth?` `int` (15), `role?` `str` | Get the AT-SPI2 widget tree with roles, names, states, and coordinates. Use `role` to filter to specific element types (e.g. `"button"`, `"check box"`). Non-matching elements are hidden but their children are still traversed. |
-| `find_ui_elements` | `query` `str`, `app_name?` `str`, `states?` `list[str]` | Search for UI elements by name, role, or description (case-insensitive). Optionally filter by AT-SPI2 states (e.g. `["focused"]`, `["active", "visible"]`). `query` can be empty when filtering by states only. |
+| `screenshot` | `include_cursor?` `bool` (false) | Capture the session screen to PNG. |
+| `accessibility_tree` | `app_name?` `str`, `max_depth?` `int` (8), `role?` `str`, `max_nodes?` `int` (200) | Return a bounded AT-SPI tree. |
+| `find_ui_elements` | `query` `str`, `app_name?` `str`, `states?` `list[str]`, `limit?` `int` (50) | Find bounded AT-SPI matches. |
+| `invoke_ui_action` | `query` `str`, `action?` `str` (`click`), `app_name?` `str`, `match_index?` `int` (0) | Invoke a widget's native AT-SPI action without global pointer input. |
 
 ### Mouse Input (6 tools)
 
@@ -244,13 +245,13 @@ kwin-mcp-cli --default-live-session
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `wait_for_element` | `query` `str`, `app_name?` `str`, `timeout_ms?` `int` (5000), `poll_interval_ms?` `int` (200), `expected_states?` `list[str]` | Poll the accessibility tree until an element matching the query and/or states appears or timeout expires. Use `expected_states` to wait for state changes (e.g. `["active"]`, `["checked"]`). `query` can be empty when waiting for state changes only. |
+| `wait_for_element` | `query` `str`, `app_name?` `str`, `timeout_ms?` `int` (5000), `poll_interval_ms?` `int` (200), `expected_states?` `list[str]`, `limit?` `int` (50) | Wait for bounded AT-SPI matches. |
 
 ### Advanced (3 tools)
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `dbus_call` | `service` `str`, `path` `str`, `interface` `str`, `method` `str`, `args?` `list[str]` | Call any D-Bus method in the isolated session. Useful for controlling KWin scripting, app-specific D-Bus APIs, and system services. |
+| `dbus_call` | `service` `str`, `path` `str`, `interface` `str`, `method` `str`, `args?` `list[str]` | Call session D-Bus. In live mode this may affect the real desktop. |
 | `read_app_log` | `pid` `int`, `last_n_lines?` `int` (50) | Read stdout/stderr output of a launched app by PID. Set `last_n_lines=0` for all output. |
 | `wayland_info` | `filter_protocol?` `str` | List Wayland protocols available in the session. Useful for verifying protocol access (e.g., `plasma_window_management`). |
 
@@ -263,7 +264,7 @@ Claude Code / AI Agent
   |
   |  MCP (stdio)
   v
-kwin-mcp server  (30 tools)       kwin-mcp-cli (interactive REPL)
+kwin-mcp server                    kwin-mcp-cli (interactive REPL)
   |                                  |
   +--- both delegate to AutomationEngine (core.py) ---+
   |
@@ -279,6 +280,7 @@ kwin-mcp server  (30 tools)       kwin-mcp-cli (interactive REPL)
   |-- accessibility_tree -------> AT-SPI2 (via PyGObject)
   |-- find_ui_elements ---------> AT-SPI2 (via PyGObject)
   |-- wait_for_element ----------> AT-SPI2 (polling)
+  |-- invoke_ui_action ----------> AT-SPI2 action
   |
   |-- mouse_* ------------------> KWin EIS D-Bus --> libei
   |-- keyboard_* ---------------> KWin EIS D-Bus --> libei
@@ -297,14 +299,16 @@ kwin-mcp server  (30 tools)       kwin-mcp-cli (interactive REPL)
   +-- wayland_info --------------> wayland-info
 ```
 
-### Triple Isolation (+ Optional Home Isolation)
+### Virtual-session separation
 
-kwin-mcp provides three layers of isolation from the host desktop:
+Virtual mode separates GUI activity from the visible desktop:
 
 1. **D-Bus isolation** -- `dbus-run-session` creates a private session bus. The isolated session's services (KWin, AT-SPI2, portals) are invisible to the host.
 2. **Display isolation** -- `kwin_wayland --virtual` creates its own Wayland compositor with a virtual framebuffer. No windows appear on the host display.
 3. **Input isolation** -- Input events are injected through KWin's EIS interface into the isolated compositor only. The host desktop receives no input from kwin-mcp.
-4. **Home directory isolation** (optional) -- When `isolate_home=true` is set in `session_start`, a temporary HOME directory is created with isolated XDG directories (`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME`). Apps in the session cannot read or modify host user settings (e.g. `~/.config/kdeglobals`), improving test reproducibility and safety. `XDG_RUNTIME_DIR` is intentionally not isolated because the Wayland socket resides there.
+4. **Temporary HOME/XDG paths** (optional) -- `isolate_home=true` redirects normal configuration and cache paths. It does not block absolute filesystem paths. `XDG_RUNTIME_DIR` remains shared so the Wayland socket is reachable.
+
+These mechanisms are not a security sandbox: the filesystem, network and process namespace remain shared. Use Bubblewrap, systemd sandboxing, a carefully scoped container, or a VM for untrusted applications.
 
 ### Input Injection
 
@@ -367,6 +371,25 @@ sudo dnf install kwin-wayland spectacle at-spi2-core python3-gobject dbus-python
 # Optional: for clipboard and Unicode input
 sudo dnf install wl-clipboard wtype wayland-utils
 ```
+
+</details>
+
+<details>
+<summary><strong>Bazzite / Fedora Atomic KDE</strong></summary>
+
+Bazzite's host is immutable and `uv tool install` builds PyGObject/dbus-python in an isolated environment. Prefer a host-side system-Python environment that can use Fedora's `python3-gobject` and `dbus-python` packages. Package layering may be required if those runtime dependencies are absent; avoid layering compiler/development packages solely for a PyPI build.
+
+When the Fedora Python bindings are present, create a host-side environment that reuses them:
+
+```bash
+python3 -m venv --system-site-packages ~/.local/share/kwin-mcp-venv
+~/.local/share/kwin-mcp-venv/bin/pip install --no-deps kwin-mcp
+~/.local/share/kwin-mcp-venv/bin/pip install "mcp>=1.0.0,<2" "Pillow>=10.0.0"
+```
+
+Configure the MCP command as `~/.local/share/kwin-mcp-venv/bin/kwin-mcp`. If `python3-gobject`, `dbus-python`, `at-spi2-core`, `libei`, or `spectacle` is absent, add only the missing runtime package through your Bazzite image or rpm-ostree deployment.
+
+Distrobox is useful for development, but live control from a container requires access to the host Wayland socket, session D-Bus, AT-SPI bus, and matching native libraries. That weakens the container boundary. Keep the live-session broker host-side where possible.
 
 </details>
 

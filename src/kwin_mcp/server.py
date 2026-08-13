@@ -27,7 +27,7 @@ _live_session_mode = "--default-live-session" in sys.argv
 # ── Session management ──────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(description="Start a private virtual KWin session; optionally launch an app.")
 def session_start(
     app_command: Annotated[
         str,
@@ -54,10 +54,7 @@ def session_start(
     ] = False,
     isolate_home: Annotated[
         bool,
-        Field(
-            description="Create a temporary HOME directory with isolated XDG directories "
-            "(config, data, cache, state). Prevents apps from reading/writing host user settings."
-        ),
+        Field(description="Use temporary HOME/XDG directories; this is not filesystem isolation."),
     ] = False,
     keep_home: Annotated[
         bool,
@@ -90,7 +87,7 @@ def session_start(
     )
 
 
-@mcp.tool()
+@mcp.tool(description="Attach to an existing KWin session. Input affects that live session.")
 def session_connect(
     dbus_address: Annotated[
         str,
@@ -125,7 +122,7 @@ def session_connect(
     )
 
 
-@mcp.tool()
+@mcp.tool(description="Stop or disconnect the current session and clean temporary resources.")
 def session_stop() -> str:
     """Stop the current session and clean up.
 
@@ -140,7 +137,7 @@ def session_stop() -> str:
 # ── Screenshot / Accessibility ───────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(description="Capture the current session screen to PNG.")
 def screenshot(
     include_cursor: Annotated[
         bool,
@@ -155,13 +152,13 @@ def screenshot(
     return _engine.screenshot(include_cursor=include_cursor)
 
 
-@mcp.tool()
+@mcp.tool(description="Return a bounded AT-SPI tree; filter by app or role.")
 def accessibility_tree(
     app_name: Annotated[
         str,
         Field(description="Filter to a specific app name (empty string = all apps)."),
     ] = "",
-    max_depth: Annotated[int, Field(description="Maximum tree traversal depth.")] = 15,
+    max_depth: Annotated[int, Field(description="Maximum tree depth.", ge=0, le=32)] = 8,
     role: Annotated[
         str,
         Field(
@@ -170,6 +167,7 @@ def accessibility_tree(
             "but their children are still traversed to find deeper matches."
         ),
     ] = "",
+    max_nodes: Annotated[int, Field(description="Maximum elements to scan.", ge=1, le=1000)] = 200,
 ) -> str:
     """Get the accessibility tree of apps in the isolated session.
 
@@ -177,10 +175,12 @@ def accessibility_tree(
     and bounding box coordinates. Use this to understand UI structure before
     interacting with elements.
     """
-    return _engine.accessibility_tree(app_name=app_name, max_depth=max_depth, role=role)
+    return _engine.accessibility_tree(
+        app_name=app_name, max_depth=max_depth, role=role, max_nodes=max_nodes
+    )
 
 
-@mcp.tool()
+@mcp.tool(description="Find AT-SPI elements by text or state.")
 def find_ui_elements(
     query: Annotated[
         str,
@@ -201,6 +201,7 @@ def find_ui_elements(
             "Common states: active, focused, visible, enabled, checked, selected, expanded."
         ),
     ] = None,
+    limit: Annotated[int, Field(description="Maximum matches to return.", ge=1, le=200)] = 50,
 ) -> str:
     """Find UI elements matching a search query and/or required AT-SPI2 states.
 
@@ -208,13 +209,13 @@ def find_ui_elements(
     (x, y, width, height), and available actions. Use this to locate specific
     buttons, inputs, or labels before clicking or interacting.
     """
-    return _engine.find_ui_elements(query=query, app_name=app_name, states=states)
+    return _engine.find_ui_elements(query=query, app_name=app_name, states=states, limit=limit)
 
 
 # ── Mouse tools ──────────────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(description="Click session coordinates.")
 def mouse_click(
     x: Annotated[
         int,
@@ -239,10 +240,7 @@ def mouse_click(
     ] = 0,
     screenshot_after_ms: Annotated[
         list[int] | None,
-        Field(
-            description="Capture screenshots at these delays (ms) after the click. "
-            "Example: [0, 50, 200] captures 3 frames showing the click effect."
-        ),
+        Field(description="Capture frames after these delays (ms)."),
     ] = None,
 ) -> str:
     """Click at coordinates in the isolated session.
@@ -263,16 +261,13 @@ def mouse_click(
     )
 
 
-@mcp.tool()
+@mcp.tool(description="Move the session pointer.")
 def mouse_move(
     x: Annotated[int, Field(description="X coordinate in pixels.")],
     y: Annotated[int, Field(description="Y coordinate in pixels.")],
     screenshot_after_ms: Annotated[
         list[int] | None,
-        Field(
-            description="Capture screenshots at these delays (ms) after moving. "
-            "Useful for observing hover effects and tooltip animations."
-        ),
+        Field(description="Capture frames after these delays (ms)."),
     ] = None,
 ) -> str:
     """Move the mouse cursor to coordinates without clicking.
@@ -283,7 +278,7 @@ def mouse_move(
     return _engine.mouse_move(x=x, y=y, screenshot_after_ms=screenshot_after_ms)
 
 
-@mcp.tool()
+@mcp.tool(description="Scroll at session coordinates.")
 def mouse_scroll(
     x: Annotated[int, Field(description="X coordinate in pixels.")],
     y: Annotated[int, Field(description="Y coordinate in pixels.")],
@@ -322,7 +317,7 @@ def mouse_scroll(
     )
 
 
-@mcp.tool()
+@mcp.tool(description="Drag between session coordinates.")
 def mouse_drag(
     from_x: Annotated[int, Field(description="Starting X coordinate in pixels.")],
     from_y: Annotated[int, Field(description="Starting Y coordinate in pixels.")],
@@ -344,7 +339,7 @@ def mouse_drag(
     ] = None,
     screenshot_after_ms: Annotated[
         list[int] | None,
-        Field(description="Capture screenshots at these delays (ms) after the drag completes."),
+        Field(description="Capture frames after these delays (ms)."),
     ] = None,
 ) -> str:
     """Drag from one point to another in the isolated session.
@@ -365,7 +360,7 @@ def mouse_drag(
     )
 
 
-@mcp.tool()
+@mcp.tool(description="Press and hold a pointer button.")
 def mouse_button_down(
     x: Annotated[int, Field(description="X coordinate in pixels.")],
     y: Annotated[int, Field(description="Y coordinate in pixels.")],
@@ -382,7 +377,7 @@ def mouse_button_down(
     return _engine.mouse_button_down(x=x, y=y, button=button)
 
 
-@mcp.tool()
+@mcp.tool(description="Release a held pointer button.")
 def mouse_button_up(
     x: Annotated[int, Field(description="X coordinate in pixels.")],
     y: Annotated[int, Field(description="Y coordinate in pixels.")],
@@ -401,7 +396,7 @@ def mouse_button_up(
 # ── Keyboard tools ───────────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(description="Type US-QWERTY text into the focused element.")
 def keyboard_type(
     text: Annotated[
         str,
@@ -412,10 +407,7 @@ def keyboard_type(
     ],
     screenshot_after_ms: Annotated[
         list[int] | None,
-        Field(
-            description="Capture screenshots at these delays (ms) after typing. "
-            "Useful for observing autocomplete popups and input validation."
-        ),
+        Field(description="Capture frames after these delays (ms)."),
     ] = None,
 ) -> str:
     """Type ASCII text into the currently focused element.
@@ -427,7 +419,7 @@ def keyboard_type(
     return _engine.keyboard_type(text=text, screenshot_after_ms=screenshot_after_ms)
 
 
-@mcp.tool()
+@mcp.tool(description="Type Unicode text into the focused element.")
 def keyboard_type_unicode(
     text: Annotated[
         str,
@@ -435,7 +427,7 @@ def keyboard_type_unicode(
     ],
     screenshot_after_ms: Annotated[
         list[int] | None,
-        Field(description="Capture screenshots at these delays (ms) after typing."),
+        Field(description="Capture frames after these delays (ms)."),
     ] = None,
 ) -> str:
     """Type arbitrary Unicode text including non-ASCII characters.
@@ -448,7 +440,7 @@ def keyboard_type_unicode(
     return _engine.keyboard_type_unicode(text=text, screenshot_after_ms=screenshot_after_ms)
 
 
-@mcp.tool()
+@mcp.tool(description="Press and release a key or key combination.")
 def keyboard_key(
     key: Annotated[
         str,
@@ -459,10 +451,7 @@ def keyboard_key(
     ],
     screenshot_after_ms: Annotated[
         list[int] | None,
-        Field(
-            description="Capture screenshots at these delays (ms) after the key press. "
-            "Useful for observing menu openings and dialog transitions."
-        ),
+        Field(description="Capture frames after these delays (ms)."),
     ] = None,
 ) -> str:
     """Press and release a key or key combination.
@@ -473,7 +462,7 @@ def keyboard_key(
     return _engine.keyboard_key(key=key, screenshot_after_ms=screenshot_after_ms)
 
 
-@mcp.tool()
+@mcp.tool(description="Press and hold a key or combination.")
 def keyboard_key_down(
     key: Annotated[
         str,
@@ -489,7 +478,7 @@ def keyboard_key_down(
     return _engine.keyboard_key_down(key=key)
 
 
-@mcp.tool()
+@mcp.tool(description="Release a held key or combination.")
 def keyboard_key_up(
     key: Annotated[
         str,
@@ -507,7 +496,7 @@ def keyboard_key_up(
 # ── Touch tools ──────────────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(description="Tap session coordinates with emulated touch.")
 def touch_tap(
     x: Annotated[int, Field(description="X coordinate in pixels.")],
     y: Annotated[int, Field(description="Y coordinate in pixels.")],
@@ -519,7 +508,7 @@ def touch_tap(
     ] = 0,
     screenshot_after_ms: Annotated[
         list[int] | None,
-        Field(description="Capture screenshots at these delays (ms) after the tap."),
+        Field(description="Capture frames after these delays (ms)."),
     ] = None,
 ) -> str:
     """Tap at coordinates using touch input.
@@ -530,7 +519,7 @@ def touch_tap(
     return _engine.touch_tap(x=x, y=y, hold_ms=hold_ms, screenshot_after_ms=screenshot_after_ms)
 
 
-@mcp.tool()
+@mcp.tool(description="Perform a single-finger touch swipe.")
 def touch_swipe(
     from_x: Annotated[int, Field(description="Starting X coordinate in pixels.")],
     from_y: Annotated[int, Field(description="Starting Y coordinate in pixels.")],
@@ -539,7 +528,7 @@ def touch_swipe(
     duration_ms: Annotated[int, Field(description="Duration of the swipe in milliseconds.")] = 300,
     screenshot_after_ms: Annotated[
         list[int] | None,
-        Field(description="Capture screenshots at these delays (ms) after the swipe."),
+        Field(description="Capture frames after these delays (ms)."),
     ] = None,
 ) -> str:
     """Swipe from one point to another using single-finger touch input.
@@ -556,7 +545,7 @@ def touch_swipe(
     )
 
 
-@mcp.tool()
+@mcp.tool(description="Perform a two-finger pinch gesture.")
 def touch_pinch(
     center_x: Annotated[int, Field(description="Center X coordinate of the pinch gesture.")],
     center_y: Annotated[int, Field(description="Center Y coordinate of the pinch gesture.")],
@@ -576,7 +565,7 @@ def touch_pinch(
     ] = 500,
     screenshot_after_ms: Annotated[
         list[int] | None,
-        Field(description="Capture screenshots at these delays (ms) after the pinch."),
+        Field(description="Capture frames after these delays (ms)."),
     ] = None,
 ) -> str:
     """Perform a two-finger pinch gesture.
@@ -594,7 +583,7 @@ def touch_pinch(
     )
 
 
-@mcp.tool()
+@mcp.tool(description="Perform a parallel multi-finger swipe.")
 def touch_multi_swipe(
     from_x: Annotated[
         int, Field(description="Starting X coordinate (center of finger group) in pixels.")
@@ -608,7 +597,7 @@ def touch_multi_swipe(
     duration_ms: Annotated[int, Field(description="Duration of the swipe in milliseconds.")] = 300,
     screenshot_after_ms: Annotated[
         list[int] | None,
-        Field(description="Capture screenshots at these delays (ms) after the swipe."),
+        Field(description="Capture frames after these delays (ms)."),
     ] = None,
 ) -> str:
     """Perform a multi-finger swipe gesture.
@@ -630,7 +619,7 @@ def touch_multi_swipe(
 # ── Clipboard tools ──────────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(description="Read bounded text from the session clipboard.")
 def clipboard_get() -> str:
     """Read the current clipboard content in the isolated session.
 
@@ -641,7 +630,7 @@ def clipboard_get() -> str:
     return _engine.clipboard_get()
 
 
-@mcp.tool()
+@mcp.tool(description="Replace the session clipboard text.")
 def clipboard_set(
     text: Annotated[str, Field(description="Text to copy to clipboard.")],
 ) -> str:
@@ -657,7 +646,7 @@ def clipboard_set(
 # ── Wait-for-UI tools ───────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(description="Wait for matching AT-SPI elements.")
 def wait_for_element(
     query: Annotated[
         str,
@@ -670,8 +659,12 @@ def wait_for_element(
         str,
         Field(description="Filter to a specific app name (empty string = all apps)."),
     ] = "",
-    timeout_ms: Annotated[int, Field(description="Maximum wait time in milliseconds.")] = 5000,
-    poll_interval_ms: Annotated[int, Field(description="Polling interval in milliseconds.")] = 200,
+    timeout_ms: Annotated[
+        int, Field(description="Maximum wait time in milliseconds.", ge=0, le=60_000)
+    ] = 5000,
+    poll_interval_ms: Annotated[
+        int, Field(description="Polling interval in milliseconds.", ge=10, le=5000)
+    ] = 200,
     expected_states: Annotated[
         list[str] | None,
         Field(
@@ -680,6 +673,7 @@ def wait_for_element(
             "Common states: active, focused, visible, enabled, checked, selected, expanded."
         ),
     ] = None,
+    limit: Annotated[int, Field(description="Maximum matches to return.", ge=1, le=200)] = 50,
 ) -> str:
     """Wait for a UI element matching query and/or states to appear.
 
@@ -693,13 +687,27 @@ def wait_for_element(
         timeout_ms=timeout_ms,
         poll_interval_ms=poll_interval_ms,
         expected_states=expected_states,
+        limit=limit,
+    )
+
+
+@mcp.tool(description="Invoke a semantic AT-SPI action without global pointer input.")
+def invoke_ui_action(
+    query: Annotated[str, Field(description="Element name, role, or description text.")],
+    action: Annotated[str, Field(description='AT-SPI action name, usually "click".')] = "click",
+    app_name: Annotated[str, Field(description="Optional application-name filter.")] = "",
+    match_index: Annotated[int, Field(description="Zero-based match to invoke.")] = 0,
+) -> str:
+    """Invoke a widget's native accessibility action."""
+    return _engine.invoke_ui_action(
+        query=query, action=action, app_name=app_name, match_index=match_index
     )
 
 
 # ── Window management tools ──────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(description="Launch an application in the current session.")
 def launch_app(
     command: Annotated[
         str,
@@ -718,7 +726,7 @@ def launch_app(
     return _engine.launch_app(command=command, env=env)
 
 
-@mcp.tool()
+@mcp.tool(description="List AT-SPI-visible application windows.")
 def list_windows() -> str:
     """List accessible application windows in the isolated session.
 
@@ -729,7 +737,7 @@ def list_windows() -> str:
     return _engine.list_windows()
 
 
-@mcp.tool()
+@mcp.tool(description="Focus the first AT-SPI window matching an application name.")
 def focus_window(
     app_name: Annotated[
         str,
@@ -747,7 +755,7 @@ def focus_window(
 # ── D-Bus tools ──────────────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(description="Call session D-Bus. On live sessions this can affect the desktop.")
 def dbus_call(
     service: Annotated[str, Field(description='D-Bus service name (e.g. "org.kde.KWin").')],
     path: Annotated[str, Field(description='Object path (e.g. "/org/kde/KWin").')],
@@ -771,7 +779,7 @@ def dbus_call(
     )
 
 
-@mcp.tool()
+@mcp.tool(description="Read bounded output from an application launched by this server.")
 def read_app_log(
     pid: Annotated[
         int,
@@ -790,7 +798,7 @@ def read_app_log(
     return _engine.read_app_log(pid=pid, last_n_lines=last_n_lines)
 
 
-@mcp.tool()
+@mcp.tool(description="List bounded Wayland protocol information.")
 def wayland_info(
     filter_protocol: Annotated[
         str,
@@ -817,16 +825,14 @@ def _apply_live_session_mode() -> None:
     # Update session_start to indicate it's NOT the default
     tools = mcp._tool_manager._tools
     if "session_start" in tools:
-        tools["session_start"].description = (
-            "Start an isolated virtual KWin Wayland session. "
-            "Only use when explicitly asked for an isolated/virtual session. "
-            "The default session tool is session_connect (live session mode is active)."
-        )
+        tools[
+            "session_start"
+        ].description = "Start a private virtual KWin session; live mode is currently the default."
     if "session_connect" in tools:
-        tools["session_connect"].description = (
-            "Connect to an existing KWin session (e.g. the real desktop or a container). "
-            "This is the default session tool. Connects to a KWin compositor that is already "
-            "running. Clipboard is always available. Input injection uses KWin EIS."
+        tools[
+            "session_connect"
+        ].description = (
+            "Attach to the default existing KWin session. Input affects that live session."
         )
 
 

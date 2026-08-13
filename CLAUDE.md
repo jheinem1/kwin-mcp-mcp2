@@ -60,7 +60,7 @@ See ROADMAP.md. Key modules:
 | `src/kwin_mcp/server.py` | tool-registration, code-general | Check tool count, README tool tables, CONTRIBUTING structure, **integrations/*/skills/*/SKILL.md tool list freshness** |
 | `src/kwin_mcp/session.py` | session-api | Check README arch diagram, CONTRIBUTING session docs |
 | `src/kwin_mcp/core.py` | engine-api, code-general | Check README arch description, CONTRIBUTING structure |
-| `src/kwin_mcp/*.py` (any) | code-general | Check concrete numbers, CONTRIBUTING file listing, **integrations/*/skills/*/SKILL.md "30 capabilities" reference** |
+| `src/kwin_mcp/*.py` (any) | code-general | Check concrete numbers, CONTRIBUTING file listing, and bundled skill guidance. |
 | `pyproject.toml` | package-metadata | Sync keywords with `.claude/positioning.yml`; check CLAUDE.md keyword tiers; **run `python3 scripts/sync_plugin_version.py` to propagate version to integrations manifests** |
 | `CHANGELOG.md` | changelog-update | Sync docs-seo.md positioning; add new search intents |
 | `README.md` | readme-update | Sync docs-seo.md positioning; update CLAUDE.md keyword tiers |
@@ -122,7 +122,7 @@ When writing or editing any documentation (README.md, CHANGELOG.md, GitHub relea
 - **Patch releases** structure: What's Changed -> detailed description -> Full Changelog comparison link
 - First sentence must convey the value proposition (what the user gains)
 - Name exact technologies: AT-SPI2, libei, EIS, KWin ScreenShot2, D-Bus, PyGObject, wl-clipboard, wtype
-- Include tool counts when relevant (e.g. "30 MCP tools" or "17 new tools")
+- Include tool counts only when relevant and derive them from `src/kwin_mcp/server.py`.
 
 ### pyproject.toml SEO Rules
 
