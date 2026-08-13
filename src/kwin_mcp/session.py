@@ -61,6 +61,23 @@ def _find_at_spi_bus_launcher() -> str:
     raise RuntimeError(msg)
 
 
+def _remove_tree_stably(path: Path, attempts: int = 20, delay: float = 0.1) -> None:
+    """Remove a session-owned tree and prove it is not being recreated."""
+    consecutive_absent = 0
+    for _ in range(attempts):
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+        time.sleep(delay)
+        if path.exists():
+            consecutive_absent = 0
+            continue
+        consecutive_absent += 1
+        if consecutive_absent >= 2:
+            return
+    msg = f"Failed to remove session-owned directory after {attempts} attempts: {path}"
+    raise OSError(msg)
+
+
 class SessionType(Enum):
     """Type of KWin session."""
 
@@ -354,8 +371,8 @@ class Session:
             keep_home = self._config is not None and self._config.keep_home
             keep_screenshots = self._config is not None and self._config.keep_screenshots
             if not keep_home:
-                # Remove entire home dir (includes screenshots)
-                shutil.rmtree(self._home_dir, ignore_errors=True)
+                # Remove the entire home and ensure late writers do not recreate it.
+                _remove_tree_stably(self._home_dir)
             elif not keep_screenshots:
                 # Keep home but remove screenshots subdirectory
                 screenshots = self._home_dir / ".screenshots"
