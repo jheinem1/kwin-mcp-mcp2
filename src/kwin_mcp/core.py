@@ -209,10 +209,10 @@ class AutomationEngine:
         time.sleep(0.5)
         try:
             self._input = InputBackend(info.dbus_address)
-        except RuntimeError:
+            input_status = "Input backend: KWin EIS"
+        except (OSError, RuntimeError) as exc:
             self._input = None
-
-        input_status = "Input backend: KWin EIS" if self._input else "No input backend available"
+            input_status = f"No input backend: {exc}"
         result += f"\n{input_status}"
 
         return result
@@ -263,20 +263,14 @@ class AutomationEngine:
 
         result = f"Connected to live KWin session. D-Bus: {dbus_addr}, Wayland: {wayland_disp}"
 
-        # Set up input backend — EIS first, ydotool fallback
+        # Set up the KWin EIS input backend.
         time.sleep(0.3)
         try:
             self._input = InputBackend(dbus_addr)
             result += "\nInput backend: KWin EIS"
-        except RuntimeError:
+        except (OSError, RuntimeError) as exc:
             self._input = None
-            if shutil.which("ydotool"):
-                result += "\nInput backend: ydotool (EIS unavailable)"
-            else:
-                result += (
-                    "\nNo input backend available (EIS connection failed and ydotool not found). "
-                    "Screenshot and accessibility tools still work."
-                )
+            result += f"\nNo input backend: {exc}. Observation tools remain available."
 
         return result
 
@@ -498,9 +492,8 @@ class AutomationEngine:
                 "wl-clipboard (e.g. 'sudo pacman -S wl-clipboard')."
             )
         inp = self._get_input()
-        session = self._get_session()
-        dbus_addr = session.info.dbus_address if session.info else None
-        ok = inp.keyboard_type_unicode(text, dbus_address=dbus_addr)
+        self._get_session()
+        ok = inp.keyboard_type_unicode(text, env=self._session_env())
         result = f"Typed unicode: {text!r}" if ok else f"Failed to type unicode: {text!r}"
         return self._with_frame_capture(result, screenshot_after_ms)
 
