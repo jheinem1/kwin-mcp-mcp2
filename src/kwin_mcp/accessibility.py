@@ -16,6 +16,17 @@ import gi
 gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi  # noqa: E402
 
+_DEFAULT_MAX_DEPTH = 8
+_DEFAULT_MAX_NODES = 200
+_DEFAULT_RESULT_LIMIT = 50
+_COMPACT_STATES = {"active", "checked", "disabled", "expanded", "focused", "selected"}
+
+
+def _quoted_label(text: str, limit: int = 160) -> str:
+    """Quote and bound application-controlled labels for one-line output."""
+    suffix = "…" if len(text) > limit else ""
+    return json.dumps(text[:limit] + suffix, ensure_ascii=False)
+
 
 @dataclass
 class ElementInfo:
@@ -34,10 +45,18 @@ class ElementInfo:
     depth: int
 
 
+@dataclass
+class TraversalBudget:
+    max_nodes: int
+    visited: int = 0
+    truncated: bool = False
+
+
 def get_accessibility_tree(
     app_name: str = "",
-    max_depth: int = 15,
+    max_depth: int = _DEFAULT_MAX_DEPTH,
     role: str = "",
+    max_nodes: int = _DEFAULT_MAX_NODES,
 ) -> str:
     """Get the accessibility tree as a formatted text string.
 
@@ -54,6 +73,8 @@ def get_accessibility_tree(
     lines: list[str] = []
     total = 0
     role_filter = role.lower()
+    budget = TraversalBudget(min(max(1, max_nodes), 1000))
+    max_depth = min(max(0, max_depth), 32)
 
     for i in range(desktop.get_child_count()):
         app = desktop.get_child_at_index(i)
@@ -64,18 +85,31 @@ def get_accessibility_tree(
         if app_name and app_name.lower() not in name.lower():
             continue
 
-        count = _format_element(app, lines, depth=0, max_depth=max_depth, role_filter=role_filter)
+        count = _format_element(
+            app,
+            lines,
+            depth=0,
+            max_depth=max_depth,
+            role_filter=role_filter,
+            budget=budget,
+        )
         total += count
+        if budget.truncated:
+            break
 
     if not lines:
         return "(no accessible applications found)"
 
-    header = f"# Accessibility Tree ({total} elements)\n\n"
+    suffix = "; truncated" if budget.truncated else ""
+    header = f"AT-SPI: {total} shown, {budget.visited} scanned{suffix}\n"
     return header + "\n".join(lines)
 
 
 def find_elements(
-    query: str, app_name: str = "", states: list[str] | None = None
+    query: str,
+    app_name: str = "",
+    states: list[str] | None = None,
+    limit: int = _DEFAULT_RESULT_LIMIT,
 ) -> list[ElementInfo]:
     """Find elements matching a query string and/or required states.
 
@@ -93,6 +127,8 @@ def find_elements(
     desktop = Atspi.get_desktop(0)
     results: list[ElementInfo] = []
     query_lower = query.lower()
+    limit = min(max(1, limit), 200)
+    budget = TraversalBudget(1000)
 
     for i in range(desktop.get_child_count()):
         app = desktop.get_child_at_index(i)
@@ -103,7 +139,18 @@ def find_elements(
         if app_name and app_name.lower() not in name.lower():
             continue
 
-        _search_element(app, query_lower, results, depth=0, max_depth=15, required_states=states)
+        _search_element(
+            app,
+            query_lower,
+            results,
+            depth=0,
+            max_depth=15,
+            required_states=states,
+            limit=limit,
+            budget=budget,
+        )
+        if len(results) >= limit or budget.truncated:
+            break
 
     return results
 
@@ -117,6 +164,7 @@ def list_windows() -> str:
     desktop = Atspi.get_desktop(0)
     lines: list[str] = []
     app_count = 0
+    window_count = 0
     for i in range(desktop.get_child_count()):
         app = desktop.get_child_at_index(i)
         if app is None:
@@ -124,7 +172,7 @@ def list_windows() -> str:
         app_name = app.get_name() or "(unnamed)"
         child_count = app.get_child_count()
         app_count += 1
-        lines.append(f"- {app_name} ({child_count} windows)")
+        lines.append(f"- {_quoted_label(app_name)} ({child_count} windows)")
         for j in range(child_count):
             win = app.get_child_at_index(j)
             if win is None:
@@ -137,7 +185,14 @@ def list_windows() -> str:
             if state_set.contains(Atspi.StateType.FOCUSED):
                 markers.append("focused")
             marker_str = f" [{', '.join(markers)}]" if markers else ""
-            lines.append(f'    - "{win_title}"{marker_str}')
+            lines.append(f"    - {_quoted_label(win_title)}{marker_str}")
+            window_count += 1
+            if window_count >= 200:
+                lines.append("… truncated")
+                return f"Applications ({app_count}+):\n" + "\n".join(lines)
+        if app_count >= 200:
+            lines.append("… truncated")
+            return f"Applications ({app_count}+):\n" + "\n".join(lines)
     if not lines:
         return "(no accessible applications found)"
     return f"Applications ({app_count}):\n" + "\n".join(lines)
@@ -167,10 +222,10 @@ def focus_window(app_name: str) -> str:
                     component = win.get_component_iface()
                     if component is not None:
                         component.grab_focus()
-                        return f"Focused: {name}"
+                        return f"Focused: {_quoted_label(name)}"
                 except Exception:
                     continue
-            return f"Found '{name}' but could not focus it"
+            return f"Found {_quoted_label(name)} but could not focus it"
     return f"No application matching '{app_name}' found"
 
 
@@ -180,6 +235,7 @@ def wait_for_elements(
     timeout_ms: int = 5000,
     poll_interval_ms: int = 200,
     states: list[str] | None = None,
+    limit: int = _DEFAULT_RESULT_LIMIT,
 ) -> list[ElementInfo]:
     """Poll for elements matching a query and/or states until found or timeout.
 
@@ -200,7 +256,7 @@ def wait_for_elements(
     interval = poll_interval_ms / 1000.0
 
     while True:
-        elements = find_elements(query, app_name=app_name, states=states)
+        elements = find_elements(query, app_name=app_name, states=states, limit=limit)
         if elements:
             return elements
 
@@ -220,6 +276,7 @@ def _format_element(
     depth: int,
     max_depth: int,
     role_filter: str = "",
+    budget: TraversalBudget | None = None,
 ) -> int:
     """Recursively format an element and its children. Returns element count.
 
@@ -228,6 +285,12 @@ def _format_element(
     """
     if depth > max_depth:
         return 0
+    if budget is None:
+        budget = TraversalBudget(_DEFAULT_MAX_NODES)
+    if budget.visited >= budget.max_nodes:
+        budget.truncated = True
+        return 0
+    budget.visited += 1
 
     info = _extract_info(element, depth)
     role_match = not role_filter or role_filter == info.role.lower()
@@ -235,11 +298,13 @@ def _format_element(
     count = 0
     if role_match:
         indent = "  " * depth
-        states_str = f" ({', '.join(info.states)})" if info.states else ""
-        pos_str = f" @ ({info.x}, {info.y}, {info.width}x{info.height})"
-        actions_str = f" [actions: {', '.join(info.actions)}]" if info.actions else ""
-
-        line = f'{indent}- [{info.role}] "{info.name}"{states_str}{pos_str}{actions_str}'
+        states = [state for state in info.states if state in _COMPACT_STATES]
+        states_str = f" [{','.join(states)}]" if states else ""
+        actions_str = f" {{{','.join(info.actions)}}}" if info.actions else ""
+        line = (
+            f"{indent}{info.role} {_quoted_label(info.name)} "
+            f"{info.x},{info.y},{info.width}x{info.height}{states_str}{actions_str}"
+        )
         lines.append(line)
         count = 1
 
@@ -247,7 +312,9 @@ def _format_element(
     for i in range(info.children_count):
         child = element.get_child_at_index(i)
         if child is not None:
-            count += _format_element(child, lines, depth + 1, max_depth, role_filter)
+            count += _format_element(child, lines, depth + 1, max_depth, role_filter, budget)
+            if budget.truncated:
+                break
 
     return count
 
@@ -259,10 +326,18 @@ def _search_element(
     depth: int,
     max_depth: int,
     required_states: list[str] | None = None,
+    limit: int = _DEFAULT_RESULT_LIMIT,
+    budget: TraversalBudget | None = None,
 ) -> None:
     """Recursively search for elements matching the query and/or required states."""
-    if depth > max_depth:
+    if budget is None:
+        budget = TraversalBudget(1000)
+    if depth > max_depth or len(results) >= limit:
         return
+    if budget.visited >= budget.max_nodes:
+        budget.truncated = True
+        return
+    budget.visited += 1
 
     info = _extract_info(element, depth)
 
@@ -283,14 +358,77 @@ def _search_element(
     for i in range(info.children_count):
         child = element.get_child_at_index(i)
         if child is not None:
-            _search_element(child, query, results, depth + 1, max_depth, required_states)
+            _search_element(
+                child,
+                query,
+                results,
+                depth + 1,
+                max_depth,
+                required_states,
+                limit,
+                budget,
+            )
+            if len(results) >= limit or budget.truncated:
+                break
+
+
+def invoke_action(query: str, action: str, app_name: str = "", match_index: int = 0) -> str:
+    """Invoke an AT-SPI action on a matching element without pointer input."""
+    desktop = Atspi.get_desktop(0)
+    matches: list[tuple[Atspi.Accessible, ElementInfo]] = []
+    query_lower = query.lower()
+    visited = 0
+
+    def collect(element: Atspi.Accessible, depth: int = 0) -> None:
+        nonlocal visited
+        if depth > 15 or visited >= 1000 or len(matches) >= _DEFAULT_RESULT_LIMIT:
+            return
+        visited += 1
+        info = _extract_info(element, depth)
+        if (
+            query_lower in info.name.lower()
+            or query_lower in info.role.lower()
+            or query_lower in info.description.lower()
+        ) and action.lower() in {item.lower() for item in info.actions}:
+            matches.append((element, info))
+        for index in range(info.children_count):
+            child = element.get_child_at_index(index)
+            if child is not None:
+                collect(child, depth + 1)
+
+    for index in range(desktop.get_child_count()):
+        app = desktop.get_child_at_index(index)
+        if app is None:
+            continue
+        if app_name and app_name.lower() not in (app.get_name() or "").lower():
+            continue
+        collect(app)
+        if visited >= 1000 or len(matches) >= _DEFAULT_RESULT_LIMIT:
+            break
+
+    if not matches:
+        return f"No element matching {query!r} exposes action {action!r}"
+    if match_index < 0 or match_index >= len(matches):
+        return f"match_index must be 0..{len(matches) - 1}"
+
+    element, info = matches[match_index]
+    action_iface = element.get_action_iface()
+    if action_iface is None:
+        return f"Action {action!r} disappeared before invocation"
+    for index in range(action_iface.get_n_actions()):
+        action_name = action_iface.get_action_name(index) or ""
+        if action_name.lower() == action.lower():
+            if not action_iface.do_action(index):
+                return f"Action {action!r} was rejected"
+            return f"Invoked {action!r} on {info.role} {_quoted_label(info.name)}"
+    return f"Action {action!r} disappeared before invocation"
 
 
 def _extract_info(element: Atspi.Accessible, depth: int) -> ElementInfo:
     """Extract information from an AT-SPI accessible element."""
-    role = element.get_role_name() or "unknown"
-    name = element.get_name() or ""
-    description = element.get_description() or ""
+    role = (element.get_role_name() or "unknown")[:80]
+    name = (element.get_name() or "")[:512]
+    description = (element.get_description() or "")[:512]
 
     # Get states
     state_set = element.get_state_set()
@@ -319,7 +457,7 @@ def _extract_info(element: Atspi.Accessible, depth: int) -> ElementInfo:
             for i in range(action_iface.get_n_actions()):
                 action_name = action_iface.get_action_name(i)
                 if action_name:
-                    actions.append(action_name)
+                    actions.append(" ".join(action_name.split())[:80])
     except Exception:
         pass
 
@@ -348,8 +486,9 @@ def _handle_request(request: dict) -> dict:
     if op == "tree":
         result = get_accessibility_tree(
             app_name=request.get("app_name", ""),
-            max_depth=request.get("max_depth", 15),
+            max_depth=request.get("max_depth", _DEFAULT_MAX_DEPTH),
             role=request.get("role", ""),
+            max_nodes=request.get("max_nodes", _DEFAULT_MAX_NODES),
         )
         return {"ok": True, "result": result}
 
@@ -358,6 +497,7 @@ def _handle_request(request: dict) -> dict:
             query=request.get("query", ""),
             app_name=request.get("app_name", ""),
             states=request.get("states"),
+            limit=request.get("limit", _DEFAULT_RESULT_LIMIT),
         )
         return {"ok": True, "result": [asdict(e) for e in elements]}
 
@@ -369,6 +509,7 @@ def _handle_request(request: dict) -> dict:
                 timeout_ms=request.get("timeout_ms", 5000),
                 poll_interval_ms=request.get("poll_interval_ms", 200),
                 states=request.get("states"),
+                limit=request.get("limit", _DEFAULT_RESULT_LIMIT),
             )
         except TimeoutError as exc:
             return {"ok": False, "error": str(exc)}
@@ -379,6 +520,15 @@ def _handle_request(request: dict) -> dict:
 
     if op == "focus_window":
         result = focus_window(app_name=request.get("app_name", ""))
+        return {"ok": True, "result": result}
+
+    if op == "invoke_action":
+        result = invoke_action(
+            query=request.get("query", ""),
+            action=request.get("action", "click"),
+            app_name=request.get("app_name", ""),
+            match_index=request.get("match_index", 0),
+        )
         return {"ok": True, "result": result}
 
     return {"ok": False, "error": f"Unknown operation: {op}"}

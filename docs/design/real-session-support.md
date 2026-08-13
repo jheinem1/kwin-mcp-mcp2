@@ -43,12 +43,13 @@ CLI and MCP server both support `--default-live-session` flag. When set:
 - `session_start` (virtual) requires explicit invocation
 - MCP tool descriptions change dynamically: `session_connect` becomes "default", `session_start` becomes "only when explicitly asked"
 
-### D4: Input injection strategy — EIS first, ydotool fallback
+### D4: Input injection strategy — EIS only
 
 EIS (Emulated Input Server) is used for mouse/keyboard/touch input injection. On real sessions:
 1. **EIS D-Bus direct connection** tried first (likely works since same user session)
-2. On failure, **ydotool fallback** (uinput-level, supports mouse+keyboard+touch)
-3. XDG RemoteDesktop Portal excluded (requires authorization popup every time — unsuitable for automation)
+2. On failure, input tools return an error while observation remains available.
+3. `ydotool` is not advertised: `/dev/uinput` expands the security boundary and no backend is implemented.
+4. XDG RemoteDesktop Portal is excluded because it requires interactive authorization.
 
 ### D5: `session_stop` on real session = disconnect only
 
@@ -88,7 +89,7 @@ Orthogonal to virtual/real split. `SessionInfo` can gain a `monitors` field late
   2. Default from `$DBUS_SESSION_BUS_ADDRESS` / `$WAYLAND_DISPLAY`
   3. Validate KWin reachable via D-Bus
   4. Create `RealSession`
-  5. Try EIS → ydotool fallback → input unavailable warning
+  5. Try EIS → input unavailable warning
 - `_clipboard_enabled = True` for real sessions
 - Error messages: "Call session_start or session_connect first"
 
@@ -96,9 +97,9 @@ Orthogonal to virtual/real split. `SessionInfo` can gain a `monitors` field late
 
 New tool with `dbus_address`, `wayland_display`, `keep_screenshots` parameters.
 
-### Step 4: `input.py` — ydotool fallback
+### Step 4: `input.py` — EIS failure handling
 
-`InputBackend` falls back to ydotool subprocess when EIS connection fails.
+Load libei lazily and preserve observation-only operation when EIS is unavailable.
 
 ### Step 5: `screenshot.py` — verify spectacle fallback works on real sessions
 
@@ -126,7 +127,7 @@ Changes needed:
 | `launch_app` | `session.py` | `RealSession.launch_app()` uses host env |
 
 No changes needed (key rationale):
-- **All input tools**: Abstracted through `InputBackend` (EIS or ydotool)
+- **All input tools**: Routed through the EIS `InputBackend`
 - **screenshot**: Reads `dbus_address`/`wayland_socket` from `SessionInfo`
 - **Accessibility tools**: `_session_env()` sets `DBUS_SESSION_BUS_ADDRESS` → works on real AT-SPI2 bus
 - **dbus_call, wayland_info**: Use `_session_env()` → work on real D-Bus/Wayland
@@ -141,6 +142,6 @@ No changes needed (key rationale):
 |-----------|----------------|--------------|
 | Screenshot (D-Bus) | `KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1` | Not set — spectacle fallback |
 | Screenshot (spectacle) | Works | Works |
-| Input (EIS) | `KWIN_WAYLAND_NO_PERMISSION_CHECKS=1` | May work (same user) → ydotool fallback |
+| Input (EIS) | `KWIN_WAYLAND_NO_PERMISSION_CHECKS=1` | May work when KWin exposes its private EIS interface |
 | Accessibility (AT-SPI2) | Isolated bus | Host bus (works) |
 | Clipboard | Requires `enable_clipboard=True` | Always available |

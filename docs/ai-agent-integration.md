@@ -4,15 +4,15 @@ Three onboarding paths for `kwin-mcp`. Pick the one that matches your editor.
 
 ## Why use the integrations?
 
-`kwin-mcp` exposes **30 MCP tools**. Without context, an AI agent often calls them in the wrong order — skipping `session_start`, mixing up `keyboard_type` vs `keyboard_type_unicode`, ignoring the AT-SPI2 surface-local coordinate system, and so on.
+`kwin-mcp` exposes focused tools for virtual and live KDE sessions. The bundled skill supplies the routing and safety rules agents need.
 
 Each integration package bundles:
 
 - The MCP server config, so you don't have to edit JSON by hand.
 - The `kwin-desktop-automation` **skill**, which loads operational guidance into the agent only when desktop-automation work is requested. The skill teaches:
   1. **Which session mode to pick** — `session_start` for virtual / isolated testing, `session_connect` for live desktop / container / kiosk.
-  2. **The observe → act → verify loop**, with observation tools ordered by cost (`list_windows` < `accessibility_tree` < `find_ui_elements` < `wait_for_element` < `screenshot`).
-  3. **Pitfalls** — US-QWERTY-only `keyboard_type`, Unicode via `keyboard_type_unicode`, clipboard opt-in on virtual sessions, AT-SPI2 surface-local coordinates, QMenu invisibility, screen-edge triggers ignored by EIS.
+  2. **The semantic-first loop** — find or wait for an element, invoke its AT-SPI action when possible, and use EIS or screenshots as fallbacks.
+  3. **Pitfalls** — live global input, virtual clipboard opt-in, surface-local coordinates, and incomplete accessibility trees.
   4. **Cleanup** — always call `session_stop`; `keep_screenshots=true` and `keep_home=true` leak `/tmp` directories.
 
 ## Scenario A — Claude Code only

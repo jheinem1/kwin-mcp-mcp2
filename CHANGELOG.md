@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `invoke_ui_action` for native AT-SPI actions without compositor-global pointer input
+- Bounded accessibility traversal/results and model-visible text output
+- Bazzite/Fedora Atomic installation guidance
+
+### Changed
+
+- Compact MCP descriptions, accessibility serialization, action responses, and bundled skill
+- Virtual child environments no longer inherit ambient credential variables
+- Pin MCP to the supported 1.x FastMCP API
+
 ### Fixed
 
 - Segfault on Python 3.14 caused by missing `argtypes` on variadic `ei_seat_bind_capabilities` ctypes call

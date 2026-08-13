@@ -3,7 +3,12 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from kwin_mcp.session import Session, SessionConfig, _find_at_spi_bus_launcher
+from kwin_mcp.session import (
+    Session,
+    SessionConfig,
+    _find_at_spi_bus_launcher,
+    _sanitized_environment,
+)
 
 
 class AtSpiLauncherTests(unittest.TestCase):
@@ -38,6 +43,22 @@ class WrapperTests(unittest.TestCase):
         self.assertIn('kill -0 "$KWIN_PID"', script)
         self.assertIn('if [ "$attempt" -ge 150 ]', script)
         self.assertIn("/usr/libexec/at-spi-bus-launcher --launch-immediately", script)
+
+
+class EnvironmentTests(unittest.TestCase):
+    def test_ambient_credentials_are_not_inherited(self) -> None:
+        env = {
+            "PATH": "/usr/bin",
+            "XDG_RUNTIME_DIR": "/run/user/1000",
+            "GITHUB_TOKEN": "secret",
+            "AWS_SECRET_ACCESS_KEY": "secret",
+        }
+        with mock.patch.dict("kwin_mcp.session.os.environ", env, clear=True):
+            sanitized = _sanitized_environment()
+        self.assertEqual(sanitized["PATH"], "/usr/bin")
+        self.assertEqual(sanitized["XDG_RUNTIME_DIR"], "/run/user/1000")
+        self.assertNotIn("GITHUB_TOKEN", sanitized)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", sanitized)
 
 
 if __name__ == "__main__":

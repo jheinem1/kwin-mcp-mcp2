@@ -46,6 +46,20 @@ _INSTALL_HINTS: dict[str, str] = {
         "(e.g. 'sudo pacman -S wayland-utils' or 'sudo apt install wayland-utils')."
     ),
 }
+_MAX_MODEL_TEXT = 16_384
+
+
+def _bounded_text(text: str, limit: int = _MAX_MODEL_TEXT) -> str:
+    """Bound untrusted tool output before returning it to the model."""
+    if len(text) <= limit:
+        return text
+    omitted = len(text) - limit
+    return f"{text[:limit]}\n… truncated {omitted} characters"
+
+
+def _untrusted_text(source: str, text: str) -> str:
+    """Mark and bound application-controlled model context."""
+    return _bounded_text(f"[{source}; untrusted application output]\n{text}")
 
 
 class AutomationEngine:
@@ -96,7 +110,7 @@ class AutomationEngine:
         env.pop("DISPLAY", None)
         return env
 
-    def _run_atspi(self, op: str, **kwargs: object) -> dict:
+    def _run_atspi(self, op: str, *, retry: bool = True, **kwargs: object) -> dict:
         """Run an AT-SPI2 query in a subprocess with the isolated session's D-Bus address.
 
         The gi.repository.Atspi library caches the D-Bus connection process-wide,
@@ -109,7 +123,8 @@ class AutomationEngine:
         payload = json.dumps({"op": op, **kwargs})
 
         last_error = ""
-        for attempt in range(2):
+        attempts = 2 if retry else 1
+        for attempt in range(attempts):
             if attempt > 0:
                 time.sleep(0.5)
             try:
@@ -126,7 +141,8 @@ class AutomationEngine:
                 continue
 
             if result.returncode != 0:
-                last_error = f"AT-SPI2 query failed (exit {result.returncode}): {result.stderr}"
+                stderr = _bounded_text(result.stderr, 4096)
+                last_error = f"AT-SPI2 query failed (exit {result.returncode}): {stderr}"
                 continue
 
             try:
@@ -135,7 +151,8 @@ class AutomationEngine:
                 last_error = f"AT-SPI2 query returned invalid JSON: {result.stdout[:200]}"
                 continue
 
-        msg = f"{last_error}. Retried once but still failed — the AT-SPI2 bus may be unstable."
+        suffix = " Retried once; the AT-SPI2 bus may be unstable." if retry else ""
+        msg = f"{last_error}.{suffix}"
         raise RuntimeError(msg)
 
     def _with_frame_capture(
@@ -202,7 +219,7 @@ class AutomationEngine:
         if app_command:
             cmd = shlex.split(app_command)
             app_info = self._session.launch_app(cmd, extra_env=env)
-            result += f"\nApp launched: {app_command} (PID={app_info.pid})"
+            result += f"\nApp launched (PID={app_info.pid})"
             result += f"\nApp log: {app_info.log_path}"
 
         # Set up input backend via KWin's EIS D-Bus interface
@@ -322,18 +339,30 @@ class AutomationEngine:
         size_kb = path.stat().st_size / 1024
         return f"Screenshot saved: {path} ({size_kb:.1f} KB)"
 
-    def accessibility_tree(self, app_name: str = "", max_depth: int = 15, role: str = "") -> str:
+    def accessibility_tree(
+        self,
+        app_name: str = "",
+        max_depth: int = 8,
+        role: str = "",
+        max_nodes: int = 200,
+    ) -> str:
         """Get the accessibility tree of apps in the isolated session."""
         self._get_session()
-        resp = self._run_atspi("tree", app_name=app_name, max_depth=max_depth, role=role)
-        return resp["result"]
+        resp = self._run_atspi(
+            "tree", app_name=app_name, max_depth=max_depth, role=role, max_nodes=max_nodes
+        )
+        return _untrusted_text("AT-SPI", resp["result"])
 
     def find_ui_elements(
-        self, query: str, app_name: str = "", states: list[str] | None = None
+        self,
+        query: str,
+        app_name: str = "",
+        states: list[str] | None = None,
+        limit: int = 50,
     ) -> str:
         """Find UI elements matching a search query and/or required states."""
         self._get_session()
-        resp = self._run_atspi("find", query=query, app_name=app_name, states=states)
+        resp = self._run_atspi("find", query=query, app_name=app_name, states=states, limit=limit)
         elements = resp["result"]
 
         # Build descriptive search summary
@@ -347,14 +376,14 @@ class AutomationEngine:
         if not elements:
             return f"No elements found matching {search_desc}"
 
-        lines = [f"Found {len(elements)} elements matching {search_desc}:\n"]
+        lines = [f"{len(elements)} matches for {search_desc}"]
         for el in elements:
-            actions_str = f" [actions: {', '.join(el['actions'])}]" if el["actions"] else ""
+            actions_str = f" {{{','.join(el['actions'])}}}" if el["actions"] else ""
+            name = json.dumps(el["name"][:160], ensure_ascii=False)
             lines.append(
-                f'- [{el["role"]}] "{el["name"]}" '
-                f"@ ({el['x']}, {el['y']}, {el['width']}x{el['height']}){actions_str}"
+                f"{el['role']} {name} {el['x']},{el['y']},{el['width']}x{el['height']}{actions_str}"
             )
-        return "\n".join(lines)
+        return _untrusted_text("AT-SPI", "\n".join(lines))
 
     # ── Mouse tools ───────────────────────────────────────────────────────
 
@@ -476,7 +505,7 @@ class AutomationEngine:
         """Type ASCII text into the currently focused element."""
         inp = self._get_input()
         inp.keyboard_type(text)
-        result = f"Typed: {text!r}"
+        result = f"Typed {len(text)} characters"
         return self._with_frame_capture(result, screenshot_after_ms)
 
     def keyboard_type_unicode(
@@ -494,7 +523,7 @@ class AutomationEngine:
         inp = self._get_input()
         self._get_session()
         ok = inp.keyboard_type_unicode(text, env=self._session_env())
-        result = f"Typed unicode: {text!r}" if ok else f"Failed to type unicode: {text!r}"
+        result = f"Typed {len(text)} Unicode characters" if ok else "Unicode input failed"
         return self._with_frame_capture(result, screenshot_after_ms)
 
     def keyboard_key(
@@ -608,8 +637,11 @@ class AutomationEngine:
         except FileNotFoundError:
             return _INSTALL_HINTS["wl-paste"]
         if result.returncode != 0:
-            return f"Failed to read clipboard: {result.stderr.decode(errors='replace')}"
-        return result.stdout.decode(errors="replace")
+            return _untrusted_text(
+                "clipboard error",
+                f"Failed to read clipboard: {result.stderr.decode(errors='replace')}",
+            )
+        return _untrusted_text("clipboard", result.stdout.decode(errors="replace"))
 
     def clipboard_set(self, text: str) -> str:
         """Set the clipboard content in the isolated session."""
@@ -640,7 +672,7 @@ class AutomationEngine:
         except FileNotFoundError:
             return _INSTALL_HINTS["wl-copy"]
         time.sleep(0.1)  # Wait for fork to complete
-        return f"Clipboard set: {text!r}"
+        return f"Clipboard set ({len(text)} characters)"
 
     # ── Wait-for-UI tools ─────────────────────────────────────────────────
 
@@ -651,6 +683,7 @@ class AutomationEngine:
         timeout_ms: int = 5000,
         poll_interval_ms: int = 200,
         expected_states: list[str] | None = None,
+        limit: int = 50,
     ) -> str:
         """Wait for a UI element to appear in the accessibility tree."""
         self._get_session()
@@ -661,6 +694,7 @@ class AutomationEngine:
             timeout_ms=timeout_ms,
             poll_interval_ms=poll_interval_ms,
             states=expected_states,
+            limit=limit,
         )
         if not resp["ok"]:
             return resp["error"]
@@ -675,14 +709,29 @@ class AutomationEngine:
             criteria.append(f"states={expected_states}")
         search_desc = ", ".join(criteria) if criteria else "(all)"
 
-        lines = [f"Found {len(elements)} elements matching {search_desc}:\n"]
+        lines = [f"{len(elements)} matches for {search_desc}"]
         for el in elements:
-            actions_str = f" [actions: {', '.join(el['actions'])}]" if el["actions"] else ""
+            actions_str = f" {{{','.join(el['actions'])}}}" if el["actions"] else ""
+            name = json.dumps(el["name"][:160], ensure_ascii=False)
             lines.append(
-                f'- [{el["role"]}] "{el["name"]}" '
-                f"@ ({el['x']}, {el['y']}, {el['width']}x{el['height']}){actions_str}"
+                f"{el['role']} {name} {el['x']},{el['y']},{el['width']}x{el['height']}{actions_str}"
             )
-        return "\n".join(lines)
+        return _untrusted_text("AT-SPI", "\n".join(lines))
+
+    def invoke_ui_action(
+        self, query: str, action: str = "click", app_name: str = "", match_index: int = 0
+    ) -> str:
+        """Invoke an AT-SPI action without compositor-global input."""
+        self._get_session()
+        resp = self._run_atspi(
+            "invoke_action",
+            retry=False,
+            query=query,
+            action=action,
+            app_name=app_name,
+            match_index=match_index,
+        )
+        return _untrusted_text("AT-SPI", resp["result"])
 
     # ── Window management tools ───────────────────────────────────────────
 
@@ -691,19 +740,19 @@ class AutomationEngine:
         session = self._get_session()
         cmd = shlex.split(command)
         app_info = session.launch_app(cmd, extra_env=env)
-        return f"App launched: {command} (PID={app_info.pid})\nApp log: {app_info.log_path}"
+        return f"App launched (PID={app_info.pid})\nApp log: {app_info.log_path}"
 
     def list_windows(self) -> str:
         """List accessible application windows in the isolated session."""
         self._get_session()
         resp = self._run_atspi("list_windows")
-        return resp["result"]
+        return _untrusted_text("AT-SPI", resp["result"])
 
     def focus_window(self, app_name: str) -> str:
         """Attempt to focus a window by application name."""
         self._get_session()
         resp = self._run_atspi("focus_window", app_name=app_name)
-        return resp["result"]
+        return _untrusted_text("AT-SPI", resp["result"])
 
     # ── D-Bus tools ───────────────────────────────────────────────────────
 
@@ -738,13 +787,16 @@ class AutomationEngine:
         except FileNotFoundError:
             return _INSTALL_HINTS["dbus-send"]
         if result.returncode != 0:
-            return f"D-Bus call failed: {result.stderr.decode(errors='replace')}"
-        return result.stdout.decode(errors="replace")
+            return _untrusted_text(
+                "D-Bus error", f"D-Bus call failed: {result.stderr.decode(errors='replace')}"
+            )
+        return _untrusted_text("D-Bus reply", result.stdout.decode(errors="replace"))
 
     def read_app_log(self, pid: int, last_n_lines: int = 50) -> str:
         """Read stdout/stderr output of a launched app."""
         session = self._get_session()
-        return session.read_app_log(pid, last_n_lines=last_n_lines)
+        output = session.read_app_log(pid, last_n_lines=last_n_lines)
+        return _untrusted_text("application log", output)
 
     def wayland_info(self, filter_protocol: str = "") -> str:
         """List Wayland protocols available in the isolated session."""
@@ -759,12 +811,15 @@ class AutomationEngine:
         except FileNotFoundError:
             return _INSTALL_HINTS["wayland-info"]
         if result.returncode != 0:
-            return f"wayland-info failed: {result.stderr.decode(errors='replace')}"
+            return _untrusted_text(
+                "wayland-info error",
+                f"wayland-info failed: {result.stderr.decode(errors='replace')}",
+            )
 
         output = result.stdout.decode(errors="replace")
         if filter_protocol:
             lines = [line for line in output.splitlines() if filter_protocol in line]
             if not lines:
                 return f"No protocols matching '{filter_protocol}' found."
-            return "\n".join(lines)
-        return output
+            return _untrusted_text("wayland-info", "\n".join(lines))
+        return _untrusted_text("wayland-info", output)

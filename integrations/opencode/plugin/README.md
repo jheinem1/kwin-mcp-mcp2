@@ -61,7 +61,7 @@ A copy of this snippet ships at [`opencode.json.example`](https://github.com/isa
 `kwin-desktop-automation` is a host-agnostic `SKILL.md` shipped inside this npm package. It uses bare tool names (`session_start`, `screenshot`, etc.) — OpenCode adds its own `kwin-mcp_` prefix when exposing the tools to the model, so the agent learns the actual tool symbols from OpenCode's tool list rather than from the skill body. (The same SKILL.md content is shared with the [Claude Code plugin](https://github.com/isac322/kwin-mcp/tree/main/integrations/claude-code); `npm run build` copies the source from `../../claude-code/skills/...` into this package's `skill/` directory before packaging.) The skill covers:
 
 1. **Session mode selection** — when to call `session_start` (virtual / isolated) vs `session_connect` (live / real desktop / container / kiosk).
-2. **The observe → act → verify loop** — observation tools ordered by cost (`list_windows` < `accessibility_tree` < `find_ui_elements` < `wait_for_element` < `screenshot`).
+2. **Semantic-first operation** — find or wait for an element, invoke its AT-SPI action, then use EIS or screenshots only when needed.
 3. **Pitfalls** — `keyboard_type` is US-QWERTY only (use `keyboard_type_unicode` for CJK), clipboard is opt-in on virtual sessions, AT-SPI2 coordinates are surface-local, QMenu can be invisible to AT-SPI2, screen-edge triggers ignore EIS pointer events, container live sessions need Wayland/D-Bus mounts.
 4. **Cleanup** — always `session_stop`; `keep_screenshots=true` and `keep_home=true` leak `/tmp` directories.
 
