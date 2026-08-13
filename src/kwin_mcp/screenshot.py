@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 import dbus
@@ -34,7 +35,7 @@ def capture_screenshot_to_file(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    output_path = output_dir / f"screenshot_{timestamp}.png"
+    output_path = output_dir / f"screenshot_{timestamp}_{uuid.uuid4().hex[:8]}.png"
 
     _capture_via_spectacle(
         dbus_address,
@@ -207,7 +208,7 @@ def _capture_frame_burst_dbus(
     ):
         if not data:
             continue
-        frame_path = output_dir / f"frame_{i:03d}_{delay_ms}ms.png"
+        frame_path = output_dir / f"frame_{uuid.uuid4().hex[:8]}_{i:03d}_{delay_ms}ms.png"
         img = Image.frombytes("RGBA", (width, height), data, "raw", "BGRA", stride)
         img.save(frame_path, "PNG")
         frame_paths.append(frame_path)
@@ -232,7 +233,7 @@ def _capture_frame_burst_spectacle(
         if now < target_time:
             time.sleep(target_time - now)
 
-        frame_path = output_dir / f"frame_{i:03d}_{delay_ms}ms.png"
+        frame_path = output_dir / f"frame_{uuid.uuid4().hex[:8]}_{i:03d}_{delay_ms}ms.png"
         _capture_via_spectacle(
             dbus_address,
             wayland_socket,
