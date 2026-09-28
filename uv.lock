@@ -260,7 +260,7 @@ wheels = [
 
 [[package]]
 name = "kwin-mcp"
-version = "0.7.0+mcp2"
+version = "0.7.1+mcp2"
 source = { editable = "." }
 dependencies = [
     { name = "dbus-python" },

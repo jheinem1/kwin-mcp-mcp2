@@ -467,3 +467,20 @@ uv run ty check src/
 ## License
 
 [MIT](LICENSE)
+
+## Relative mouse control (MCP 2 fork)
+
+`mouse_move_relative(dx=120, dy=-40, duration_ms=120)` sends relative EIS
+motion for the focused application's camera/locked cursor. Deltas are motion
+units, not degrees; calibrate against the game's sensitivity. Durations are
+bounded to 0–5000 ms. The backend requires a resumed relative-pointer device
+and reports a native error if it is unavailable, paused, or disconnected.
+
+`mouse_button_down(button="left")` and `mouse_button_up(button="left")` omit
+cursor movement when both coordinates are absent. Existing calls with both
+`x` and `y` retain their coordinate-based behavior. Always pair held buttons
+with a release, preferably in a `finally` block.
+
+Input affects the focused session, not an arbitrary background window. Use a
+private virtual session for isolated tests. Minecraft compatibility and camera
+sensitivity must be verified in the intended game instance.

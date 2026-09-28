@@ -428,6 +428,20 @@ class AutomationEngine:
         result = f"Mouse moved to ({x}, {y})"
         return self._with_frame_capture(result, screenshot_after_ms)
 
+    def mouse_move_relative(
+        self,
+        dx: float,
+        dy: float,
+        duration_ms: int = 0,
+        screenshot_after_ms: list[int] | None = None,
+    ) -> str:
+        """Move the focused session pointer by relative deltas, including mouse look."""
+        self._get_input().mouse_move_relative(dx, dy, duration_ms)
+        return self._with_frame_capture(
+            f"Relative mouse motion sent: ({dx}, {dy}) over {duration_ms}ms",
+            screenshot_after_ms,
+        )
+
     def mouse_scroll(
         self,
         x: int,
@@ -475,25 +489,25 @@ class AutomationEngine:
 
     def mouse_button_down(
         self,
-        x: int,
-        y: int,
+        x: int | None = None,
+        y: int | None = None,
         button: str = "left",
     ) -> str:
         """Press a mouse button at coordinates without releasing."""
         inp = self._get_input()
         inp.mouse_button_down(x, y, MouseButton(button))
-        return f"Button {button} pressed at ({x}, {y})"
+        return f"Button {button} pressed (coordinates: {x}, {y}; None means no movement)"
 
     def mouse_button_up(
         self,
-        x: int,
-        y: int,
+        x: int | None = None,
+        y: int | None = None,
         button: str = "left",
     ) -> str:
         """Release a mouse button at coordinates."""
         inp = self._get_input()
         inp.mouse_button_up(x, y, MouseButton(button))
-        return f"Button {button} released at ({x}, {y})"
+        return f"Button {button} released (coordinates: {x}, {y}; None means no movement)"
 
     # ── Keyboard tools ────────────────────────────────────────────────────
 
