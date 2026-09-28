@@ -278,6 +278,21 @@ def mouse_move(
     return _engine.mouse_move(x=x, y=y, screenshot_after_ms=screenshot_after_ms)
 
 
+@mcp.tool(description="Send relative pointer motion for focused games and locked cursors.")
+def mouse_move_relative(
+    dx: Annotated[float, Field(description="Horizontal relative delta.", allow_inf_nan=False)],
+    dy: Annotated[float, Field(description="Vertical relative delta.", allow_inf_nan=False)],
+    duration_ms: Annotated[int, Field(ge=0, le=5000, description="Movement duration in ms.")] = 0,
+    screenshot_after_ms: Annotated[
+        list[int] | None, Field(description="Capture frames after these delays (ms).")
+    ] = None,
+) -> str:
+    """Move by deltas, not screen coordinates. Input affects the focused session."""
+    return _engine.mouse_move_relative(
+        dx=dx, dy=dy, duration_ms=duration_ms, screenshot_after_ms=screenshot_after_ms
+    )
+
+
 @mcp.tool(description="Scroll at session coordinates.")
 def mouse_scroll(
     x: Annotated[int, Field(description="X coordinate in pixels.")],
@@ -362,13 +377,17 @@ def mouse_drag(
 
 @mcp.tool(description="Press and hold a pointer button.")
 def mouse_button_down(
-    x: Annotated[int, Field(description="X coordinate in pixels.")],
-    y: Annotated[int, Field(description="Y coordinate in pixels.")],
+    x: Annotated[
+        int | None, Field(description="Optional X; omit both coordinates for games.")
+    ] = None,
+    y: Annotated[
+        int | None, Field(description="Optional Y; omit both coordinates for games.")
+    ] = None,
     button: Annotated[
         str, Field(description='Mouse button: "left", "right", or "middle".')
     ] = "left",
 ) -> str:
-    """Press a mouse button at coordinates without releasing.
+    """Press a mouse button, optionally without moving the pointer.
 
     Use with mouse_button_up to perform custom drag sequences or
     hold-and-interact patterns. The button stays pressed until
@@ -379,13 +398,17 @@ def mouse_button_down(
 
 @mcp.tool(description="Release a held pointer button.")
 def mouse_button_up(
-    x: Annotated[int, Field(description="X coordinate in pixels.")],
-    y: Annotated[int, Field(description="Y coordinate in pixels.")],
+    x: Annotated[
+        int | None, Field(description="Optional X; omit both coordinates for games.")
+    ] = None,
+    y: Annotated[
+        int | None, Field(description="Optional Y; omit both coordinates for games.")
+    ] = None,
     button: Annotated[
         str, Field(description='Mouse button: "left", "right", or "middle".')
     ] = "left",
 ) -> str:
-    """Release a mouse button at coordinates.
+    """Release a mouse button, optionally without moving the pointer.
 
     Pair with mouse_button_down. The release happens at the specified
     coordinates, which may differ from where the button was pressed.

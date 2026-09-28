@@ -1,3 +1,11 @@
+## 0.7.1+mcp2
+
+- Add relative pointer motion with bounded smooth movement through KWin EIS.
+- Track relative devices and their resumed, paused, removed, and disconnected states.
+- Allow button down/up without cursor repositioning; keep existing coordinate calls.
+- Reference shared EIS devices once and clean up each device once.
+- Keep fork releases on GitHub; only upstream may publish to PyPI.
+
 # Changelog
 
 All notable changes to this project will be documented in this file.

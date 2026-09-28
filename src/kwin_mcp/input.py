@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import ctypes.util
+import math
 import select
 import shutil
 import subprocess
@@ -21,6 +22,7 @@ from enum import Enum
 from typing import Any
 
 import dbus
+import dbus.bus
 from dbus.mainloop.glib import DBusGMainLoop
 
 
@@ -126,6 +128,8 @@ _EI_EVENT_CONNECT = 1
 _EI_EVENT_DISCONNECT = 2
 _EI_EVENT_SEAT_ADDED = 3
 _EI_EVENT_DEVICE_ADDED = 5
+_EI_EVENT_DEVICE_REMOVED = 6
+_EI_EVENT_DEVICE_PAUSED = 7
 _EI_EVENT_DEVICE_RESUMED = 8
 
 # Scroll axis values (in libei, scroll is in pixels)
@@ -248,6 +252,10 @@ class EISClient:
         self._ei: int = 0  # ctypes void pointer (int representation)
         self._cookie: int = 0
         self._pointer: int = 0  # absolute pointer device
+        self._relative_pointer: int = 0
+        self._ready_devices: set[int] = set()
+        self._owned_devices: set[int] = set()
+        self._disconnected = False
         self._keyboard: int = 0  # keyboard device
         self._touch_device: int = 0  # touch-capable device
         self._eis_iface: dbus.Interface | None = None
@@ -314,23 +322,13 @@ class EISClient:
 
                 etype = _libei.ei_event_get_type(event)
 
-                if etype == _EI_EVENT_DISCONNECT:
-                    _libei.ei_event_unref(event)
-                    msg = "EIS server disconnected during handshake"
-                    raise RuntimeError(msg)
-
-                if etype == _EI_EVENT_SEAT_ADDED:
-                    self._bind_seat_capabilities(event)
-
-                elif etype == _EI_EVENT_DEVICE_ADDED:
-                    self._register_device(event)
-
-                elif etype == _EI_EVENT_DEVICE_RESUMED:
-                    pass  # Device ready for input
-
+                self._handle_event(event, etype)
                 _libei.ei_event_unref(event)
 
-            if self._pointer and self._keyboard:
+            required = {self._pointer, self._keyboard}
+            if self._relative_pointer:
+                required.add(self._relative_pointer)
+            if 0 not in required and required <= self._ready_devices:
                 break
 
         if not self._pointer:
@@ -340,12 +338,39 @@ class EISClient:
             msg = "No keyboard device available from EIS"
             raise RuntimeError(msg)
 
-        # Start emulating on all devices
-        _libei.ei_device_start_emulating(self._pointer, 0)
-        if self._keyboard != self._pointer:
-            _libei.ei_device_start_emulating(self._keyboard, 0)
-        if self._touch_device and self._touch_device not in (self._pointer, self._keyboard):
-            _libei.ei_device_start_emulating(self._touch_device, 0)
+        if not {self._pointer, self._keyboard} <= self._ready_devices:
+            raise RuntimeError("EIS devices did not become ready before timeout")
+
+    def _handle_event(self, event: int, etype: int) -> None:
+        if etype == _EI_EVENT_DISCONNECT:
+            self._disconnected = True
+            self._ready_devices.clear()
+        elif etype == _EI_EVENT_SEAT_ADDED:
+            self._bind_seat_capabilities(event)
+        elif etype == _EI_EVENT_DEVICE_ADDED:
+            self._register_device(event)
+        elif etype in (_EI_EVENT_DEVICE_RESUMED, _EI_EVENT_DEVICE_PAUSED, _EI_EVENT_DEVICE_REMOVED):
+            device = _libei.ei_event_get_device(event)
+            if etype == _EI_EVENT_DEVICE_RESUMED and device in self._owned_devices:
+                _libei.ei_device_start_emulating(device, 0)
+                self._ready_devices.add(device)
+            else:
+                self._ready_devices.discard(device)
+            if etype == _EI_EVENT_DEVICE_REMOVED and device in self._owned_devices:
+                for attr in ("_pointer", "_relative_pointer", "_keyboard", "_touch_device"):
+                    if getattr(self, attr) == device:
+                        setattr(self, attr, 0)
+                self._owned_devices.remove(device)
+                _libei.ei_device_unref(device)
+
+    def _dispatch_events(self) -> None:
+        if _libei.ei_dispatch(self._ei) < 0:
+            self._disconnected = True
+        while event := _libei.ei_get_event(self._ei):
+            self._handle_event(event, _libei.ei_event_get_type(event))
+            _libei.ei_event_unref(event)
+        if self._disconnected:
+            raise RuntimeError("KWin EIS disconnected; reconnect the session")
 
     def _bind_seat_capabilities(self, event: int) -> None:
         """Bind to all available capabilities on the seat."""
@@ -374,17 +399,17 @@ class EISClient:
         """Register a device from a DEVICE_ADDED event."""
         device = _libei.ei_event_get_device(event)
 
-        has_abs = _libei.ei_device_has_capability(device, _EI_CAP_POINTER_ABSOLUTE)
-        has_kbd = _libei.ei_device_has_capability(device, _EI_CAP_KEYBOARD)
-        has_touch = _libei.ei_device_has_capability(device, _EI_CAP_TOUCH)
-
-        # Prefer absolute pointer device
-        if has_abs and not self._pointer:
-            self._pointer = _libei.ei_device_ref(device)
-        if has_kbd and not self._keyboard:
-            self._keyboard = _libei.ei_device_ref(device)
-        if has_touch and not self._touch_device:
-            self._touch_device = _libei.ei_device_ref(device)
+        for attr, capability in (
+            ("_pointer", _EI_CAP_POINTER_ABSOLUTE),
+            ("_relative_pointer", _EI_CAP_POINTER),
+            ("_keyboard", _EI_CAP_KEYBOARD),
+            ("_touch_device", _EI_CAP_TOUCH),
+        ):
+            if not getattr(self, attr) and _libei.ei_device_has_capability(device, capability):
+                if device not in self._owned_devices:
+                    _libei.ei_device_ref(device)
+                    self._owned_devices.add(device)
+                setattr(self, attr, device)
 
     def _now_us(self) -> int:
         """Current time in microseconds."""
@@ -393,6 +418,16 @@ class EISClient:
     def _flush(self) -> None:
         """Dispatch pending events to send data to KWin."""
         _libei.ei_dispatch(self._ei)
+
+    def pointer_move_relative(self, dx: float, dy: float) -> None:
+        """Send relative motion without warping the desktop cursor."""
+        self._dispatch_events()
+        device = self._relative_pointer
+        if not device or device not in self._ready_devices:
+            raise RuntimeError("KWin EIS relative pointer is unavailable or paused")
+        _libei.ei_device_pointer_motion(device, dx, dy)
+        _libei.ei_device_frame(device, self._now_us())
+        self._flush()
 
     def pointer_move_absolute(self, x: float, y: float) -> None:
         """Move pointer to absolute coordinates."""
@@ -477,19 +512,13 @@ class EISClient:
             _libei.ei_touch_unref(touch)
         self._active_touches.clear()
 
-        if self._touch_device and self._touch_device not in (self._pointer, self._keyboard):
-            _libei.ei_device_stop_emulating(self._touch_device)
-            _libei.ei_device_unref(self._touch_device)
-            self._touch_device = 0
-        pointer = self._pointer
-        if pointer:
-            _libei.ei_device_stop_emulating(pointer)
-            _libei.ei_device_unref(pointer)
-            self._pointer = 0
-        if self._keyboard and self._keyboard != pointer:
-            _libei.ei_device_stop_emulating(self._keyboard)
-            _libei.ei_device_unref(self._keyboard)
-        self._keyboard = 0
+        for device in self._owned_devices:
+            if device in self._ready_devices:
+                _libei.ei_device_stop_emulating(device)
+            _libei.ei_device_unref(device)
+        self._owned_devices.clear()
+        self._ready_devices.clear()
+        self._pointer = self._relative_pointer = self._keyboard = self._touch_device = 0
 
         if self._eis_iface and self._cookie:
             with contextlib.suppress(dbus.DBusException):
@@ -513,6 +542,23 @@ class InputBackend:
     def mouse_move(self, x: int, y: int) -> None:
         """Move mouse to absolute coordinates (hover)."""
         self._client.pointer_move_absolute(float(x), float(y))
+
+    def mouse_move_relative(self, dx: float, dy: float, duration_ms: int = 0) -> None:
+        """Send a bounded relative movement, optionally spread over time."""
+        if not math.isfinite(dx) or not math.isfinite(dy):
+            raise ValueError("Relative deltas must be finite")
+        if not isinstance(duration_ms, int) or not 0 <= duration_ms <= 5000:
+            raise ValueError("duration_ms must be an integer between 0 and 5000")
+        steps = max(1, math.ceil(duration_ms / 10))
+        start = time.monotonic()
+        sent_x = sent_y = 0.0
+        for step in range(1, steps + 1):
+            if duration_ms:
+                deadline = start + duration_ms / 1000 * step / steps
+                time.sleep(max(0.0, deadline - time.monotonic()))
+            target_x, target_y = dx * (step / steps), dy * (step / steps)
+            self._client.pointer_move_relative(target_x - sent_x, target_y - sent_y)
+            sent_x, sent_y = target_x, target_y
 
     def mouse_click(
         self,
@@ -675,28 +721,44 @@ class InputBackend:
             time.sleep(0.01)
             self._client.keyboard_key(mod, _RELEASED)
 
-    def mouse_button_down(self, x: int, y: int, button: MouseButton = MouseButton.LEFT) -> None:
+    def mouse_button_down(
+        self,
+        x: int | None = None,
+        y: int | None = None,
+        button: MouseButton = MouseButton.LEFT,
+    ) -> None:
         """Move to coordinates and press a mouse button without releasing.
 
         Args:
-            x, y: Coordinates.
+            x, y: Optional coordinates; omit both to avoid moving the pointer.
             button: Mouse button to press.
         """
         btn_code = _BTN_CODES[button]
-        self.mouse_move(x, y)
-        time.sleep(0.02)
+        if (x is None) != (y is None):
+            raise ValueError("Provide both x and y, or omit both")
+        if x is not None and y is not None:
+            self.mouse_move(x, y)
+            time.sleep(0.02)
         self._client.pointer_button(btn_code, _PRESSED)
 
-    def mouse_button_up(self, x: int, y: int, button: MouseButton = MouseButton.LEFT) -> None:
+    def mouse_button_up(
+        self,
+        x: int | None = None,
+        y: int | None = None,
+        button: MouseButton = MouseButton.LEFT,
+    ) -> None:
         """Move to coordinates and release a mouse button.
 
         Args:
-            x, y: Coordinates.
+            x, y: Optional coordinates; omit both to avoid moving the pointer.
             button: Mouse button to release.
         """
         btn_code = _BTN_CODES[button]
-        self.mouse_move(x, y)
-        time.sleep(0.02)
+        if (x is None) != (y is None):
+            raise ValueError("Provide both x and y, or omit both")
+        if x is not None and y is not None:
+            self.mouse_move(x, y)
+            time.sleep(0.02)
         self._client.pointer_button(btn_code, _RELEASED)
 
     def keyboard_type(self, text: str) -> None:
