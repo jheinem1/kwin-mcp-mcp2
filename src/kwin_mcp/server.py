@@ -787,6 +787,36 @@ def focus_window(
     return _engine.focus_window(app_name=app_name, window_title=window_title)
 
 
+@mcp.tool(description="List exact KWin window IDs and logical output geometry.")
+def kwin_windows() -> str:
+    """Inspect compositor windows; application labels are untrusted data."""
+    return _engine.kwin_windows()
+
+
+@mcp.tool(description="Activate an exact KWin window ID and report observed activation.")
+def activate_window(window_id: str) -> str:
+    """No title guessing or automatic mutation retry."""
+    return _engine.activate_window(window_id)
+
+
+@mcp.tool(description="Capture one named output with layout-checked coordinate metadata.")
+def screenshot_output(output_name: str, include_cursor: bool = False) -> str:
+    """Uses authorized ScreenShot2 capture; never falls back to a different output scope."""
+    return _engine.screenshot_output(output_name, include_cursor)
+
+
+@mcp.tool(description="Map a recent named-output screenshot pixel to global logical coordinates.")
+def map_screenshot_point(capture_id: str, x: float, y: float) -> str:
+    """Checks output geometry again and returns a point without clicking it."""
+    return _engine.map_screenshot_point(capture_id, x, y)
+
+
+@mcp.tool(description="Show local items or folders through the default desktop file manager.")
+def file_manager_show(paths: list[str], action: str = "show_items") -> str:
+    """Dispatch FileManager1 navigation; acceptance does not verify visible selection."""
+    return _engine.file_manager_show(paths, action)
+
+
 # ── D-Bus tools ──────────────────────────────────────────────────────────
 
 

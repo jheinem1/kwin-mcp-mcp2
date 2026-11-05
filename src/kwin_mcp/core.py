@@ -14,11 +14,14 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
+from kwin_mcp.coordinates import map_point, output_geometry
 from kwin_mcp.input import InputBackend, MouseButton
 from kwin_mcp.screenshot import (
     capture_frame_burst,
+    capture_output_dbus,
     capture_screenshot_to_file,
     screenshot_metadata,
 )
@@ -79,6 +82,7 @@ class AutomationEngine:
         self._clipboard_enabled: bool = False
         self._wl_copy_proc: subprocess.Popen[bytes] | None = None
         self._keep_screenshots: bool = False
+        self._captures: dict[str, dict] = {}
 
     # ── Private helpers ───────────────────────────────────────────────────
 
@@ -378,6 +382,92 @@ class AutomationEngine:
         return f"Screenshot saved: {path} ({size_kb:.1f} KB)\n" + json.dumps(
             screenshot_metadata(path)
         )
+
+    def kwin_windows(self) -> str:
+        """List compositor window IDs and output geometry, not accessibility titles."""
+        from kwin_mcp.windows import run_window_operation
+
+        result = run_window_operation("list", env=self._session_env())
+        return _untrusted_text("KWin window metadata", json.dumps(result))
+
+    def activate_window(self, window_id: str) -> str:
+        """Request exact-ID activation; report verification separately from dispatch."""
+        from kwin_mcp.windows import run_window_operation
+
+        result = run_window_operation("activate", window_id=window_id, env=self._session_env())
+        return _untrusted_text("KWin activation", json.dumps(result))
+
+    def screenshot_output(self, output_name: str, include_cursor: bool = False) -> str:
+        """Capture a named output and retain a short-lived, layout-checked mapping."""
+        from kwin_mcp.windows import run_window_operation
+
+        session = self._get_session()
+        info = session.info
+        if info is None:
+            raise RuntimeError("No session info available")
+        env = self._session_env()
+        before = run_window_operation("list", env=env)
+        geometry = output_geometry(before["outputs"], output_name)
+        capture_id = uuid.uuid4().hex
+        path = info.screenshot_dir / f"output_{capture_id}.png"
+        capture_output_dbus(info.dbus_address, output_name, path, include_cursor=include_cursor)
+        metadata = screenshot_metadata(path)
+        after = run_window_operation("list", env=env)
+        current = output_geometry(after["outputs"], output_name)
+        stable = geometry == current
+        metadata.update(
+            capture_id=capture_id,
+            output_name=output_name,
+            transform_available=stable,
+            origin=({key: geometry["geometry"][key] for key in ("x", "y")} if stable else None),
+            scale=geometry["scale"] if stable else None,
+            mapping_lifetime_seconds=60,
+        )
+        # Cap memory even if a client never uses or expires its receipts.
+        now = time.monotonic()
+        self._captures = {
+            key: value for key, value in self._captures.items() if now - value["created"] <= 60
+        }
+        if len(self._captures) >= 32:
+            del self._captures[next(iter(self._captures))]
+        if stable:
+            self._captures[capture_id] = {
+                "created": now,
+                "session": session,
+                "output": geometry,
+                "width": metadata["pixel_width"],
+                "height": metadata["pixel_height"],
+            }
+        return f"Screenshot saved: {path}\n" + json.dumps(metadata)
+
+    def map_screenshot_point(self, capture_id: str, x: float, y: float) -> str:
+        """Map a recent named-output image point; does not dispatch any input."""
+        from kwin_mcp.windows import run_window_operation
+
+        session = self._get_session()
+        receipt = self._captures.get(capture_id)
+        if (
+            receipt is None
+            or receipt["session"] is not session
+            or time.monotonic() - receipt["created"] > 60
+        ):
+            self._captures.pop(capture_id, None)
+            raise ValueError("Unknown, expired or previous-session capture; capture again")
+        current = run_window_operation("list", env=self._session_env())
+        return json.dumps(
+            map_point(
+                x, y, receipt["width"], receipt["height"], receipt["output"], current["outputs"]
+            )
+        )
+
+    def file_manager_show(self, paths: list[str], action: str = "show_items") -> str:
+        """Show local items/folders using the session's default FileManager1 provider."""
+        from kwin_mcp.adapters import show_local_paths
+
+        info = self._get_session().info
+        if info is None:
+            raise RuntimeError("No session info available")
+        return json.dumps(show_local_paths(info.dbus_address, paths, action=action))
 
     def accessibility_tree(
         self,

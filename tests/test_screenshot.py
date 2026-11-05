@@ -41,6 +41,18 @@ class ScreenshotTests(unittest.TestCase):
         actual, _ = screenshot._capture_raw(iface, {}, timeout=2)
         self.assertEqual(actual, data)
 
+    def test_named_output_calls_exact_capture_method(self) -> None:
+        def capture(name: str, options: dict, fd: int, *, timeout: float) -> dict:
+            self.assertEqual(name, "DP-1")
+            os.write(fd, bytes(4))
+            return {"width": 1, "height": 1, "stride": 4}
+
+        iface = mock.Mock()
+        iface.CaptureScreen.side_effect = capture
+        data, _ = screenshot._capture_raw(iface, {}, output_name="DP-1")
+        self.assertEqual(data, bytes(4))
+        iface.CaptureActiveScreen.assert_not_called()
+
     def test_dbus_failure_closes_both_descriptors(self) -> None:
         pipe = os.pipe()
         iface = mock.Mock()
