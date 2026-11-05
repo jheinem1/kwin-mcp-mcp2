@@ -2,14 +2,149 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import selectors
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 import dbus
 import dbus.bus
+
+_CAPTURE_TIMEOUT = 10.0
+_MAX_CAPTURE_BYTES = 256 * 1024 * 1024
+
+
+class UnsupportedCaptureError(RuntimeError):
+    """Capture was withheld because compositing is inactive or unverifiable."""
+
+
+def require_active_compositing(dbus_address: str) -> None:
+    """Check the safe active property before asking KWin or Spectacle to capture.
+
+    KWin 6.8.2 can accept Wayland/input clients without a render device, then
+    crash inside ScreenShot2. Even querying compositingType can dereference its
+    missing backend, so only query active. Never change renderer/security settings.
+    A successful check is not a guarantee against unrelated compositor bugs.
+    """
+    bus = None
+    try:
+        bus = (
+            dbus.bus.BusConnection(dbus_address) if dbus_address else dbus.SessionBus(private=True)
+        )
+        proxy = bus.get_object("org.kde.KWin", "/Compositor", introspect=False)
+        properties = dbus.Interface(proxy, "org.freedesktop.DBus.Properties")
+        active = bool(properties.Get("org.kde.kwin.Compositing", "active", timeout=3.0))
+    except Exception as exc:
+        raise UnsupportedCaptureError(
+            "Screenshot not attempted: could not verify that KWin compositing is active. "
+            "Use accessibility observation and inspect compositor startup diagnostics."
+        ) from exc
+    finally:
+        if bus is not None:
+            with contextlib.suppress(Exception):
+                bus.close()
+    if not active:
+        raise UnsupportedCaptureError(
+            "Screenshot not attempted: KWin compositing is inactive. "
+            "The session may accept windows/input without a working render device; "
+            "capture can crash KWin in that state. Use accessibility observation "
+            "or a separately configured rendering-capable test environment."
+        )
+
+
+def screenshot_metadata(path: Path) -> dict:
+    """Report image dimensions without inventing a global logical coordinate transform.
+
+    Spectacle may capture multiple outputs with different scales. Active-screen
+    D-Bus images do not by themselves establish that screen's global origin.
+    Clients must obtain output geometry before converting pixels to input points.
+    """
+    from PIL import Image
+
+    with Image.open(path) as img:
+        width, height = img.size
+    return {
+        "pixel_width": width,
+        "pixel_height": height,
+        "coordinate_space": "image_pixels",
+        "input_coordinate_space": "global_logical",
+        "transform_available": False,
+        "scale": None,
+        "origin": None,
+    }
+
+
+def _capture_raw(
+    iface: Any,
+    options: dict,
+    *,
+    timeout: float = _CAPTURE_TIMEOUT,
+    output_name: str | None = None,
+) -> tuple:
+    """Drain concurrently: a compositor may fill the pipe before replying on D-Bus.
+
+    The reader owns its descriptor and always closes it. Both D-Bus and pipe
+    reads have deadlines, including a writer that never closes its descriptor.
+    """
+    read_fd, write_fd = os.pipe()
+    deadline = time.monotonic() + timeout
+    chunks: list[bytes] = []
+    errors: list[Exception] = []
+
+    def drain() -> None:
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(read_fd, selectors.EVENT_READ)
+                total = 0
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(remaining):
+                        raise TimeoutError("KWin screenshot data timed out")
+                    chunk = os.read(read_fd, 65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > _MAX_CAPTURE_BYTES:
+                        raise RuntimeError("KWin screenshot exceeds 256 MiB limit")
+                    chunks.append(chunk)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            os.close(read_fd)
+
+    reader = threading.Thread(target=drain, daemon=True)
+    try:
+        reader.start()
+    except Exception:
+        os.close(read_fd)
+        os.close(write_fd)
+        raise
+    try:
+        if output_name is None:
+            results = iface.CaptureActiveScreen(
+                options, dbus.types.UnixFd(write_fd), timeout=timeout
+            )
+        else:
+            results = iface.CaptureScreen(
+                output_name, options, dbus.types.UnixFd(write_fd), timeout=timeout
+            )
+    finally:
+        os.close(write_fd)
+        reader.join(max(0.0, deadline - time.monotonic()) + 0.1)
+    if reader.is_alive():
+        raise TimeoutError("KWin screenshot reader did not finish before deadline")
+    if errors:
+        raise errors[0]
+    data = b"".join(chunks)
+    width, height, stride = (int(results[key]) for key in ("width", "height", "stride"))
+    if width <= 0 or height <= 0 or stride < width * 4 or len(data) != stride * height:
+        raise RuntimeError("KWin screenshot returned invalid dimensions or incomplete pixel data")
+    return data, results
 
 
 def capture_screenshot_to_file(
@@ -71,28 +206,13 @@ def capture_screenshot_dbus(
     """
     from PIL import Image
 
+    require_active_compositing(dbus_address)
     bus = dbus.bus.BusConnection(dbus_address)
     screenshot_obj = bus.get_object("org.kde.KWin", "/org/kde/KWin/ScreenShot2")
     iface = dbus.Interface(screenshot_obj, "org.kde.KWin.ScreenShot2")
 
-    read_fd, write_fd = os.pipe()
-    try:
-        options = {"include-cursor": dbus.Boolean(include_cursor)}
-        results = iface.CaptureActiveScreen(options, dbus.types.UnixFd(write_fd))
-    finally:
-        os.close(write_fd)
-
-    try:
-        chunks = []
-        while True:
-            chunk = os.read(read_fd, 65536)
-            if not chunk:
-                break
-            chunks.append(chunk)
-    finally:
-        os.close(read_fd)
-
-    data = b"".join(chunks)
+    options = {"include-cursor": dbus.Boolean(include_cursor)}
+    data, results = _capture_raw(iface, options)
     if not data:
         msg = "KWin ScreenShot2 returned no data"
         raise RuntimeError(msg)
@@ -132,6 +252,7 @@ def capture_frame_burst(
     Returns:
         List of paths to the captured PNG files, ordered by delay.
     """
+    require_active_compositing(dbus_address)
     output_dir.mkdir(parents=True, exist_ok=True)
     sorted_delays = sorted(delays_ms)
 
@@ -142,7 +263,7 @@ def capture_frame_burst(
         )
     except dbus.DBusException:
         # D-Bus authorization failed (e.g. live session without permission bypass).
-        # Fall back to spectacle CLI (slower but always authorized).
+        # Fall back to spectacle CLI (slower; subject to session permissions).
         return _capture_frame_burst_spectacle(
             dbus_address,
             wayland_socket,
@@ -177,24 +298,11 @@ def _capture_frame_burst_dbus(
         if now < target_time:
             time.sleep(target_time - now)
 
-        read_fd, write_fd = os.pipe()
-        try:
-            results = iface.CaptureActiveScreen(options, dbus.types.UnixFd(write_fd))
-        finally:
-            os.close(write_fd)
-        try:
-            chunks = []
-            while True:
-                chunk = os.read(read_fd, 65536)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-        finally:
-            os.close(read_fd)
+        data, results = _capture_raw(iface, options)
 
         raw_frames.append(
             (
-                b"".join(chunks),
+                data,
                 int(results["width"]),
                 int(results["height"]),
                 int(results["stride"]),
@@ -225,7 +333,7 @@ def _capture_frame_burst_spectacle(
     *,
     include_cursor: bool = False,
 ) -> list[Path]:
-    """Capture frames using spectacle CLI (slower but always authorized)."""
+    """Capture frames using spectacle CLI (slower; subject to session permissions)."""
     frame_paths: list[Path] = []
     start = time.monotonic()
     for i, delay_ms in enumerate(sorted_delays):
@@ -253,6 +361,7 @@ def _capture_via_spectacle(
     include_cursor: bool = False,
 ) -> None:
     """Capture screenshot using spectacle CLI in background mode."""
+    require_active_compositing(dbus_address)
     cmd = ["spectacle", "-b", "-f", "-n", "-o", str(output_path)]
     if include_cursor:
         cmd.append("-p")
@@ -289,3 +398,38 @@ def _capture_via_spectacle(
     if not output_path.exists() or output_path.stat().st_size == 0:
         msg = "spectacle produced no output"
         raise RuntimeError(msg)
+
+
+def capture_output_dbus(
+    dbus_address: str, output_name: str, output_path: Path, *, include_cursor: bool = False
+) -> Path:
+    """Capture exactly one named output; never fall back to a different scope."""
+    from PIL import Image
+
+    if not output_name:
+        raise ValueError("An exact output name is required")
+    require_active_compositing(dbus_address)
+    bus = dbus.bus.BusConnection(dbus_address)
+    try:
+        obj = bus.get_object("org.kde.KWin", "/org/kde/KWin/ScreenShot2")
+        iface = dbus.Interface(obj, "org.kde.KWin.ScreenShot2")
+        data, result = _capture_raw(
+            iface,
+            {
+                "include-cursor": dbus.Boolean(include_cursor),
+                "native-resolution": dbus.Boolean(True),
+            },
+            output_name=output_name,
+        )
+        image = Image.frombytes(
+            "RGBA",
+            (int(result["width"]), int(result["height"])),
+            data,
+            "raw",
+            "BGRA",
+            int(result["stride"]),
+        )
+        image.save(output_path, "PNG")
+        return output_path
+    finally:
+        bus.close()

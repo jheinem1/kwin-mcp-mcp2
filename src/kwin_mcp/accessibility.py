@@ -7,9 +7,11 @@ Reads a JSON request from stdin and writes a JSON response to stdout.
 from __future__ import annotations
 
 import json
+import signal
 import sys
 import time
 from dataclasses import asdict, dataclass
+from typing import Any, cast
 
 import gi
 
@@ -198,35 +200,39 @@ def list_windows() -> str:
     return f"Applications ({app_count}):\n" + "\n".join(lines)
 
 
-def focus_window(app_name: str) -> str:
-    """Focus a window by application name.
+def focus_window(app_name: str, window_title: str = "") -> str:
+    """Focus one unambiguous accessible window, optionally by exact title.
 
-    Args:
-        app_name: Application name substring (case-insensitive).
-
-    Returns:
-        Result message.
+    AT-SPI titles are not KWin window IDs. Reject ambiguous matches instead of
+    guessing, and report the provider's acceptance separately from focus state.
     """
+    if not app_name:
+        return "An application name is required"
     desktop = Atspi.get_desktop(0)
-    for i in range(desktop.get_child_count()):
+    matches: list[tuple[str, Atspi.Accessible]] = []
+    for i in range(min(desktop.get_child_count(), 200)):
         app = desktop.get_child_at_index(i)
         if app is None:
             continue
         name = app.get_name() or ""
-        if app_name.lower() in name.lower():
-            for j in range(app.get_child_count()):
-                win = app.get_child_at_index(j)
-                if win is None:
-                    continue
-                try:
-                    component = win.get_component_iface()
-                    if component is not None:
-                        component.grab_focus()
-                        return f"Focused: {_quoted_label(name)}"
-                except Exception:
-                    continue
-            return f"Found {_quoted_label(name)} but could not focus it"
-    return f"No application matching '{app_name}' found"
+        if app_name.lower() not in name.lower():
+            continue
+        for j in range(min(app.get_child_count(), 200)):
+            win = app.get_child_at_index(j)
+            if win is not None and (not window_title or win.get_name() == window_title):
+                matches.append((name, win))
+    if not matches:
+        return f"No window matching {app_name!r}, title={window_title!r} found"
+    if len(matches) != 1:
+        return f"Ambiguous target: {len(matches)} windows match; specify an exact window title"
+    name, win = matches[0]
+    component = win.get_component_iface()
+    if component is None or not component.grab_focus():
+        return f"Focus request rejected for {_quoted_label(name)}"
+    states = win.get_state_set()
+    if states.contains(Atspi.StateType.ACTIVE) or states.contains(Atspi.StateType.FOCUSED):
+        return f"Focused: {_quoted_label(name)} (state verified)"
+    return f"Focus request accepted for {_quoted_label(name)}; focus state not verified"
 
 
 def wait_for_elements(
@@ -252,6 +258,8 @@ def wait_for_elements(
     Raises:
         TimeoutError: If no elements found within timeout.
     """
+    if timeout_ms < 0 or poll_interval_ms <= 0:
+        raise ValueError("timeout_ms must be nonnegative and poll_interval_ms must be positive")
     deadline = time.monotonic() + timeout_ms / 1000.0
     interval = poll_interval_ms / 1000.0
 
@@ -267,7 +275,7 @@ def wait_for_elements(
             msg = f"Timeout after {timeout_ms}ms: no elements matching {criteria}"
             raise TimeoutError(msg)
 
-        time.sleep(interval)
+        time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
 
 
 def _format_element(
@@ -372,7 +380,14 @@ def _search_element(
                 break
 
 
-def invoke_action(query: str, action: str, app_name: str = "", match_index: int = 0) -> str:
+def invoke_action(
+    query: str,
+    action: str,
+    app_name: str = "",
+    match_index: int = 0,
+    required_states: list[str] | None = None,
+    verify_states: list[str] | None = None,
+) -> str:
     """Invoke an AT-SPI action on a matching element without pointer input."""
     desktop = Atspi.get_desktop(0)
     matches: list[tuple[Atspi.Accessible, ElementInfo]] = []
@@ -412,6 +427,11 @@ def invoke_action(query: str, action: str, app_name: str = "", match_index: int 
         return f"match_index must be 0..{len(matches) - 1}"
 
     element, info = matches[match_index]
+    current = _extract_info(element, info.depth)
+    if current.name != info.name or current.role != info.role:
+        return "Target changed before invocation; action not sent"
+    if required_states and not all(state in current.states for state in required_states):
+        return "Required target states are absent; action not sent"
     action_iface = element.get_action_iface()
     if action_iface is None:
         return f"Action {action!r} disappeared before invocation"
@@ -420,7 +440,19 @@ def invoke_action(query: str, action: str, app_name: str = "", match_index: int 
         if action_name.lower() == action.lower():
             if not action_iface.do_action(index):
                 return f"Action {action!r} was rejected"
-            return f"Invoked {action!r} on {info.role} {_quoted_label(info.name)}"
+            result = f"Invoked {action!r} on {info.role} {_quoted_label(info.name)}"
+            if verify_states:
+                try:
+                    after = _extract_info(element, info.depth)
+                except Exception:
+                    return result + "; action accepted, postcondition unavailable (do not retry)"
+                verified = all(state in after.states for state in verify_states)
+                return result + (
+                    "; requested states verified"
+                    if verified
+                    else "; action accepted, requested states not verified (do not retry)"
+                )
+            return result + "; action accepted, effect not verified"
     return f"Action {action!r} disappeared before invocation"
 
 
@@ -446,6 +478,8 @@ def _extract_info(element: Atspi.Accessible, depth: int) -> ElementInfo:
         if component is not None:
             rect = component.get_extents(Atspi.CoordType.SCREEN)
             x, y, width, height = rect.x, rect.y, rect.width, rect.height
+    except TimeoutError:
+        raise
     except Exception:
         pass
 
@@ -458,6 +492,8 @@ def _extract_info(element: Atspi.Accessible, depth: int) -> ElementInfo:
                 action_name = action_iface.get_action_name(i)
                 if action_name:
                     actions.append(" ".join(action_name.split())[:80])
+    except TimeoutError:
+        raise
     except Exception:
         pass
 
@@ -519,7 +555,9 @@ def _handle_request(request: dict) -> dict:
         return {"ok": True, "result": list_windows()}
 
     if op == "focus_window":
-        result = focus_window(app_name=request.get("app_name", ""))
+        result = focus_window(
+            app_name=request.get("app_name", ""), window_title=request.get("window_title", "")
+        )
         return {"ok": True, "result": result}
 
     if op == "invoke_action":
@@ -528,10 +566,43 @@ def _handle_request(request: dict) -> dict:
             action=request.get("action", "click"),
             app_name=request.get("app_name", ""),
             match_index=request.get("match_index", 0),
+            required_states=request.get("required_states"),
+            verify_states=request.get("verify_states"),
         )
         return {"ok": True, "result": result}
 
     return {"ok": False, "error": f"Unknown operation: {op}"}
+
+
+def _execute_request(req: object) -> dict:
+    """Apply worker-local deadlines; call only in the disposable main process."""
+
+    # This process is disposable: bound native D-Bus calls as well as Python
+    # traversal. The engine also enforces an outer subprocess deadline because
+    # Python signals can be delayed while a native library call is blocked.
+    def expired(_signum: int, _frame: object) -> None:
+        raise TimeoutError("AT-SPI request deadline exceeded")
+
+    if not isinstance(req, dict):
+        return {"ok": False, "error": "Request must be a JSON object"}
+
+    request = cast("dict[str, Any]", req)
+    try:
+        timeout_ms = int(request.get("request_timeout_ms", 10000))
+        if not 1 <= timeout_ms <= 120000:
+            raise ValueError("request_timeout_ms must be between 1 and 120000")
+        Atspi.set_timeout(min(timeout_ms, 1000), min(timeout_ms, 1000))
+        signal.signal(signal.SIGALRM, expired)
+        signal.setitimer(signal.ITIMER_REAL, timeout_ms / 1000)
+        resp = _handle_request(request)
+    except Exception as exc:
+        error = str(exc)
+        if request.get("op") in ("invoke_action", "focus_window"):
+            error += "; mutation outcome unknown; inspect current state before retrying"
+        resp = {"ok": False, "error": error}
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    return resp
 
 
 if __name__ == "__main__":
@@ -542,5 +613,4 @@ if __name__ == "__main__":
         json.dump({"ok": False, "error": f"Invalid JSON: {exc}"}, sys.stdout)
         sys.exit(1)
 
-    resp = _handle_request(req)
-    json.dump(resp, sys.stdout)
+    json.dump(_execute_request(req), sys.stdout)

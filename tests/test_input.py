@@ -10,8 +10,8 @@ dbus = types.ModuleType("dbus")
 dbus_bus = types.ModuleType("dbus.bus")
 dbus_mainloop = types.ModuleType("dbus.mainloop")
 dbus_glib = types.ModuleType("dbus.mainloop.glib")
-dbus_glib.DBusGMainLoop = mock.Mock()
-dbus.bus = dbus_bus
+dbus_glib.__dict__["DBusGMainLoop"] = mock.Mock()
+dbus.__dict__["bus"] = dbus_bus
 sys.modules.setdefault("dbus", dbus)
 sys.modules.setdefault("dbus.bus", dbus_bus)
 sys.modules.setdefault("dbus.mainloop", dbus_mainloop)
