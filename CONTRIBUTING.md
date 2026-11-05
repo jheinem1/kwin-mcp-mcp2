@@ -44,8 +44,8 @@ sudo apt install wl-clipboard wtype wayland-utils
 ### Clone and Install
 
 ```bash
-git clone https://github.com/isac322/kwin-mcp.git
-cd kwin-mcp
+git clone https://github.com/jheinem1/kwin-mcp-mcp2.git
+cd kwin-mcp-mcp2
 uv sync
 ```
 
@@ -82,6 +82,13 @@ Key style rules:
 - Line length: 100 characters
 - Type hints required for all function signatures
 - All code comments and docstrings in English
+
+## Regression tests without KDE
+
+`PYTHONPATH=src python -m unittest discover -s tests` runs the mocked unit
+regressions without a desktop session. These tests do not replace real KWin,
+AT-SPI and input integration tests. See [behavior and gaps](docs/BEHAVIOR_AND_GAPS.md)
+for the unverified state matrix and current reliability contracts.
 
 ## Testing Changes
 

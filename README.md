@@ -10,6 +10,27 @@
 
 A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that lets AI agents launch, interact with, and observe Wayland applications in a private virtual KWin display. It also supports **live desktop automation** by connecting to an existing KWin session. The virtual mode isolates the display and session bus; it is not a filesystem or process security sandbox.
 
+## MCP 2 fork: current support
+
+This repository is the development fork at
+[jheinem1/kwin-mcp-mcp2](https://github.com/jheinem1/kwin-mcp-mcp2).
+The PyPI badges and `uvx kwin-mcp` installation below refer to the upstream
+package, not necessarily this fork's changes. To run this fork, clone this
+repository and use `uv run kwin-mcp` after installing the native dependencies.
+
+Read [Behavior, safety boundaries, and feature gaps](docs/BEHAVIOR_AND_GAPS.md)
+for the current action/retry contract, session isolation limits, screenshot
+coordinate metadata, and what has actually been tested. In particular:
+
+- Capture failure after input does not mean the input failed. Do not repeat it
+  without inspecting state.
+- Semantic actions can check state preconditions/postconditions; they do not
+  prove arbitrary app outcomes. Exact-title AT-SPI focus rejects ambiguity.
+- Screenshot pixel dimensions are reported, but global scale/origin mapping and
+  exact KWin window-ID targeting remain gaps.
+- Background, minimized, locked and private-session support varies by control
+  path and application; this is not universal unattended app control.
+
 ## Table of Contents
 
 - [Why kwin-mcp?](#why-kwin-mcp)
@@ -31,7 +52,7 @@ A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that l
 - **No screenshots required for interaction** -- The AT-SPI2 accessibility tree gives the AI agent structured widget data (roles, names, coordinates, states, available actions), so it can interact with UI elements without relying solely on vision.
 - **Direct virtual-session input** -- Uses KWin's private EIS D-Bus interface instead of the RemoteDesktop portal. Live mode therefore grants broad control and should be enabled deliberately.
 - **Broad Wayland support** -- Qt, GTK and Electron applications can be driven through libei, with accessibility coverage varying by toolkit and application.
-- **Full input coverage** -- Mouse, keyboard, multi-touch, and clipboard -- all injected through the isolated session for complete desktop automation.
+- **Input primitives** -- Mouse, keyboard, multi-touch, and clipboard -- available within the selected session, subject to app and compositor support.
 
 ## Use Cases
 
@@ -434,8 +455,8 @@ pip install kwin-mcp
 ### From source
 
 ```bash
-git clone https://github.com/isac322/kwin-mcp.git
-cd kwin-mcp
+git clone https://github.com/jheinem1/kwin-mcp-mcp2.git
+cd kwin-mcp-mcp2
 uv sync
 uv run kwin-mcp
 ```
@@ -449,15 +470,15 @@ uv run kwin-mcp
 - **Clipboard requires opt-in** -- Clipboard tools (`clipboard_get`, `clipboard_set`) are disabled by default because `wl-copy` can hang in isolated sessions. Enable with `enable_clipboard=true` in `session_start`, and ensure `wl-clipboard` is installed.
 - **QMenu (native context menus) may not appear in AT-SPI2** -- Qt's AT-SPI2 bridge has incomplete support for popup menus on Wayland. Context menus may not be visible in `accessibility_tree` or `find_ui_elements`. Workaround: use `screenshot` to visually locate menu items and click by coordinates.
 - **Screen edge triggers do not work with EIS input** -- Auto-hide panels and layer-shell trigger strips rely on Wayland surface input routing, which may not respond to EIS-injected pointer events. Workaround: use `dbus_call` with KWin scripting or keyboard shortcuts instead.
-- **AT-SPI2 coordinates are surface-local, not screen-global** -- Wayland clients do not know their global screen position (by design). Coordinates returned by `find_ui_elements` and `accessibility_tree` are relative to the window's top-left corner, not the virtual screen. For single-window scenarios this is usually fine; for multi-window layouts, combine with `screenshot` for absolute positioning.
+- **Coordinate mapping requires verification** -- AT-SPI2 coordinates can be surface-local depending on toolkit and Wayland support. Screenshot pixels may differ from EIS global logical input coordinates. Pixel dimensions are returned, but scale/origin mapping is not yet available; do not assume a 1:1 transform.
 
 ## Contributing
 
 Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style guidelines, and the pull request process.
 
 ```bash
-git clone https://github.com/isac322/kwin-mcp.git
-cd kwin-mcp
+git clone https://github.com/jheinem1/kwin-mcp-mcp2.git
+cd kwin-mcp-mcp2
 uv sync
 uv run ruff check src/
 uv run ruff format --check src/

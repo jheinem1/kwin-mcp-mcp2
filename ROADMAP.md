@@ -34,16 +34,32 @@ This allows Claude Code to act as a desktop automation agent on real user deskto
 Claude Code
   └── kwin-mcp (MCP server)
         ├── Environment management: dbus-run-session + kwin_wayland --virtual
-        ├── Screen observation: spectacle CLI + AT-SPI2
+        ├── Screen observation: Spectacle / KWin ScreenShot2 + AT-SPI2
         └── Input injection: KWin EIS D-Bus + libei
 ```
 
-Triple isolation ensures no impact on the host desktop:
+Virtual-session display isolation (not a filesystem or process sandbox):
 1. dbus-run-session → D-Bus session isolation
 2. kwin_wayland --virtual → Display isolation
 3. EIS (Emulated Input Server) → Input isolation (inside isolated session only)
 
 ---
+
+## Current reliability work
+
+See [Behavior and gaps](docs/BEHAVIOR_AND_GAPS.md) for current contracts and
+verification limits. Historical milestones below are not a live compatibility
+matrix for this fork.
+
+- [x] Bounded startup reads, prerequisite diagnostics, owned-resource cleanup.
+- [x] Bounded accessibility requests; no automatic mutation retries.
+- [x] Ambiguity-safe AT-SPI focus and optional semantic state verification.
+- [x] Separate action dispatch from screenshot observation failures.
+- [x] Report screenshot dimensions and explicitly unknown coordinate transforms.
+- [ ] Exact KWin window IDs and verified activation/geometry lookup.
+- [ ] Mixed-DPI screenshot-to-input coordinate transforms.
+- [ ] App adapters with durable postconditions and real KDE integration tests.
+- [ ] Verify foreground/background/minimized/locked/isolated behavior per app.
 
 ## Milestones
 

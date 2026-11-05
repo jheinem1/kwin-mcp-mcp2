@@ -17,7 +17,11 @@ import time
 from pathlib import Path
 
 from kwin_mcp.input import InputBackend, MouseButton
-from kwin_mcp.screenshot import capture_frame_burst, capture_screenshot_to_file
+from kwin_mcp.screenshot import (
+    capture_frame_burst,
+    capture_screenshot_to_file,
+    screenshot_metadata,
+)
 from kwin_mcp.session import LiveSession, Session, SessionConfig
 
 # Install hints for external binaries
@@ -120,13 +124,22 @@ class AutomationEngine:
         Retries once on failure to handle transient AT-SPI2 bus instability.
         """
         env = self._session_env()
-        payload = json.dumps({"op": op, **kwargs})
+        # One wall-clock budget, including retry, not 30 seconds per attempt.
+        timeout_ms = kwargs.get("timeout_ms", 5000)
+        if not isinstance(timeout_ms, (int, float)) or not 0 <= timeout_ms <= 59000:
+            raise ValueError("timeout_ms must be between 0 and 59000")
+        budget = max(1.0, timeout_ms / 1000 + 1)
+        deadline = time.monotonic() + budget
+        payload = json.dumps({"op": op, "request_timeout_ms": int(budget * 1000), **kwargs})
 
         last_error = ""
         attempts = 2 if retry else 1
         for attempt in range(attempts):
             if attempt > 0:
-                time.sleep(0.5)
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             try:
                 result = subprocess.run(
                     [sys.executable, "-m", "kwin_mcp.accessibility"],
@@ -134,10 +147,10 @@ class AutomationEngine:
                     env=env,
                     capture_output=True,
                     text=True,
-                    timeout=30,
+                    timeout=remaining,
                 )
             except subprocess.TimeoutExpired:
-                last_error = f"AT-SPI2 query timed out after 30s (op={op})"
+                last_error = f"AT-SPI2 operation deadline exceeded (op={op}); outcome unknown"
                 continue
 
             if result.returncode != 0:
@@ -146,12 +159,26 @@ class AutomationEngine:
                 continue
 
             try:
-                return json.loads(result.stdout)
+                response = json.loads(result.stdout)
             except json.JSONDecodeError:
                 last_error = f"AT-SPI2 query returned invalid JSON: {result.stdout[:200]}"
                 continue
+            if (
+                not isinstance(response, dict)
+                or type(response.get("ok")) is not bool
+                or not isinstance(
+                    response.get("result" if response["ok"] else "error"), (str, list)
+                )
+            ):
+                last_error = "AT-SPI2 query returned an invalid response shape"
+                continue
+            return response
 
-        suffix = " Retried once; the AT-SPI2 bus may be unstable." if retry else ""
+        suffix = (
+            " Read retries are bounded by the original deadline."
+            if retry
+            else " Mutation outcome unknown; inspect current state before retrying."
+        )
         msg = f"{last_error}.{suffix}"
         raise RuntimeError(msg)
 
@@ -164,23 +191,34 @@ class AutomationEngine:
         if not screenshot_after_ms:
             return action_result
 
-        session = self._get_session()
-        info = session.info
-        if info is None:
-            return action_result
-
-        frames = capture_frame_burst(
-            dbus_address=info.dbus_address,
-            output_dir=info.screenshot_dir,
-            delays_ms=screenshot_after_ms,
-            wayland_socket=info.wayland_socket,
-        )
-
-        lines = [action_result, f"Captured {len(frames)} frames:"]
-        for delay_ms, path in zip(sorted(screenshot_after_ms), frames, strict=True):
-            size_kb = path.stat().st_size / 1024
-            lines.append(f"  {delay_ms}ms: {path} ({size_kb:.1f} KB)")
-        return "\n".join(lines)
+        # Input has already been dispatched. Never turn an observation failure
+        # into an action error that might cause a client to repeat the input.
+        try:
+            session = self._get_session()
+            info = session.info
+            if info is None:
+                raise RuntimeError("No session info available")
+            frames = capture_frame_burst(
+                dbus_address=info.dbus_address,
+                output_dir=info.screenshot_dir,
+                delays_ms=screenshot_after_ms,
+                wayland_socket=info.wayland_socket,
+            )
+            lines = [
+                action_result,
+                "Action status: dispatched; effect not verified.",
+                f"Observation status: captured {len(frames)} frames:",
+            ]
+            for delay_ms, path in zip(sorted(screenshot_after_ms), frames, strict=True):
+                lines.append(f"  {delay_ms}ms: {path}")
+                lines.append(json.dumps(screenshot_metadata(path)))
+            return "\n".join(lines)
+        except Exception as exc:
+            return (
+                f"{action_result}\nAction status: dispatched; effect not verified.\n"
+                f"Observation status: failed ({_bounded_text(str(exc), 1024)}).\n"
+                "Do not repeat the action because capture failed; inspect current state first."
+            )
 
     # ── Session management ────────────────────────────────────────────────
 
@@ -337,7 +375,9 @@ class AutomationEngine:
             output_dir=info.screenshot_dir,
         )
         size_kb = path.stat().st_size / 1024
-        return f"Screenshot saved: {path} ({size_kb:.1f} KB)"
+        return f"Screenshot saved: {path} ({size_kb:.1f} KB)\n" + json.dumps(
+            screenshot_metadata(path)
+        )
 
     def accessibility_tree(
         self,
@@ -351,7 +391,7 @@ class AutomationEngine:
         resp = self._run_atspi(
             "tree", app_name=app_name, max_depth=max_depth, role=role, max_nodes=max_nodes
         )
-        return _untrusted_text("AT-SPI", resp["result"])
+        return _untrusted_text("AT-SPI", resp["result"] if resp["ok"] else resp["error"])
 
     def find_ui_elements(
         self,
@@ -733,7 +773,13 @@ class AutomationEngine:
         return _untrusted_text("AT-SPI", "\n".join(lines))
 
     def invoke_ui_action(
-        self, query: str, action: str = "click", app_name: str = "", match_index: int = 0
+        self,
+        query: str,
+        action: str = "click",
+        app_name: str = "",
+        match_index: int = 0,
+        required_states: list[str] | None = None,
+        verify_states: list[str] | None = None,
     ) -> str:
         """Invoke an AT-SPI action without compositor-global input."""
         self._get_session()
@@ -744,8 +790,10 @@ class AutomationEngine:
             action=action,
             app_name=app_name,
             match_index=match_index,
+            required_states=required_states,
+            verify_states=verify_states,
         )
-        return _untrusted_text("AT-SPI", resp["result"])
+        return _untrusted_text("AT-SPI", resp["result"] if resp["ok"] else resp["error"])
 
     # ── Window management tools ───────────────────────────────────────────
 
@@ -760,13 +808,15 @@ class AutomationEngine:
         """List accessible application windows in the isolated session."""
         self._get_session()
         resp = self._run_atspi("list_windows")
-        return _untrusted_text("AT-SPI", resp["result"])
+        return _untrusted_text("AT-SPI", resp["result"] if resp["ok"] else resp["error"])
 
-    def focus_window(self, app_name: str) -> str:
+    def focus_window(self, app_name: str, window_title: str = "") -> str:
         """Attempt to focus a window by application name."""
         self._get_session()
-        resp = self._run_atspi("focus_window", app_name=app_name)
-        return _untrusted_text("AT-SPI", resp["result"])
+        resp = self._run_atspi(
+            "focus_window", retry=False, app_name=app_name, window_title=window_title
+        )
+        return _untrusted_text("AT-SPI", resp["result"] if resp["ok"] else resp["error"])
 
     # ── D-Bus tools ───────────────────────────────────────────────────────
 

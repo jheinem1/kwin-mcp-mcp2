@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import select
 import shlex
 import shutil
@@ -16,6 +17,7 @@ import signal
 import subprocess
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -140,6 +142,8 @@ class Session:
         self._config: SessionConfig | None = None
         self._home_dir: Path | None = None
         self._startup_log: BinaryIO | None = None
+        self._runtime_dir: Path | None = None
+        self._owns_socket = False
 
     @property
     def is_running(self) -> bool:
@@ -179,90 +183,119 @@ class Session:
 
         if config is None:
             config = SessionConfig()
-        self._config = config
+        if config.screen_width <= 0 or config.screen_height <= 0:
+            raise ValueError("Screen dimensions must be positive")
+        if config.socket_name and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]*", config.socket_name
+        ):
+            raise ValueError("Socket name must be a simple filename (letters, digits, _, . or -)")
+        for executable in (
+            "dbus-run-session",
+            "bash",
+            "kwin_wayland",
+            "dbus-update-activation-environment",
+        ):
+            if shutil.which(executable) is None:
+                raise RuntimeError(
+                    f"Required executable not found: {executable}; install it before retrying"
+                )
         at_spi_launcher = _find_at_spi_bus_launcher()
+        # Dispose of any resources from a compositor that exited between calls.
+        self.stop()
+        self._config = config
+        self._socket_name = config.socket_name or f"wayland-mcp-{uuid.uuid4().hex}"
+        env = self._build_env(config)
+        self._runtime_dir = Path(env["XDG_RUNTIME_DIR"])
+        if not self._runtime_dir.is_dir():
+            raise RuntimeError(f"XDG_RUNTIME_DIR is not a directory: {self._runtime_dir}")
+        socket_path = self._runtime_dir / self._socket_name
+        if any(p.exists() or p.is_symlink() for p in (socket_path, Path(f"{socket_path}.lock"))):
+            raise RuntimeError(
+                f"Wayland socket already exists: {socket_path}; choose another socket_name"
+            )
 
-        self._socket_name = config.socket_name or f"wayland-mcp-{os.getpid()}-{int(time.time())}"
+        try:
+            if config.isolate_home:
+                self._home_dir = Path(tempfile.mkdtemp(prefix="kwin-mcp-home-"))
+                for subdir in (".config", ".local/share", ".local/state", ".cache", ".screenshots"):
+                    (self._home_dir / subdir).mkdir(parents=True, exist_ok=True)
+            env = self._build_env(config)
+            self._startup_log = tempfile.TemporaryFile()  # noqa: SIM115 - closed by stop()
+            self._process = subprocess.Popen(
+                [
+                    "dbus-run-session",
+                    "bash",
+                    "-c",
+                    self._build_wrapper_script(config, at_spi_launcher),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=self._startup_log,
+                env=env,
+                start_new_session=True,
+            )
+            self._owns_socket = True
+            dbus_address = self._read_startup_status(_STARTUP_TIMEOUT_SECONDS)
+            if not socket_path.is_socket():
+                raise RuntimeError("READY received without a Wayland socket")
+            screenshot_dir = (
+                self._home_dir / ".screenshots"
+                if self._home_dir
+                else Path(tempfile.mkdtemp(prefix="kwin-mcp-screenshots-"))
+            )
+            self._info = SessionInfo(
+                dbus_address=dbus_address,
+                wayland_socket=self._socket_name,
+                kwin_pid=self._process.pid,
+                screenshot_dir=screenshot_dir,
+                home_dir=self._home_dir,
+            )
+            return self._info
+        except Exception as exc:
+            stderr = self._read_startup_log()
+            returncode = self._process.poll() if self._process else None
+            try:
+                self.stop()
+            except OSError as cleanup_error:
+                raise RuntimeError(
+                    f"Session startup failed: {exc}; exit={returncode}; stderr: {stderr}; "
+                    f"cleanup failed: {cleanup_error}"
+                ) from exc
+            raise RuntimeError(
+                f"Session startup failed: {exc}; exit={returncode}; stderr: {stderr}"
+            ) from exc
 
-        # Create isolated home directory if requested
-        if config.isolate_home:
-            self._home_dir = Path(tempfile.mkdtemp(prefix="kwin-mcp-home-"))
-            for subdir in (
-                ".config",
-                Path(".local") / "share",
-                Path(".local") / "state",
-                ".cache",
-                ".screenshots",
-            ):
-                (self._home_dir / subdir).mkdir(parents=True, exist_ok=True)
-
-        # Clean up any stale socket files
-        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-        for suffix in ("", ".lock"):
-            path = Path(runtime_dir) / f"{self._socket_name}{suffix}"
-            path.unlink(missing_ok=True)
-
-        # Build the wrapper script that runs inside dbus-run-session
-        wrapper_script = self._build_wrapper_script(config, at_spi_launcher)
-
-        # Start the isolated session in its own process group
-        self._startup_log = tempfile.TemporaryFile()  # noqa: SIM115 - closed by stop()
-        self._process = subprocess.Popen(
-            ["dbus-run-session", "bash", "-c", wrapper_script],
-            stdout=subprocess.PIPE,
-            stderr=self._startup_log,
-            env=self._build_env(config),
-            start_new_session=True,
-        )
-
-        # Read startup output from the wrapper script.
-        # Expected lines: DBUS_SESSION_BUS_ADDRESS=..., READY
-        # Any other lines (e.g. from D-Bus activation) are ignored.
+    def _read_startup_status(self, timeout: float) -> str:
+        """Read bounded chunks, never a blocking readline from an incomplete line."""
+        assert self._process is not None and self._process.stdout is not None
+        deadline = time.monotonic() + timeout
+        pending = b""
         dbus_address = ""
-        got_ready = False
-        if self._process.stdout:
-            deadline = time.monotonic() + _STARTUP_TIMEOUT_SECONDS
-            while time.monotonic() < deadline:
+        fd = self._process.stdout.fileno()
+        while time.monotonic() < deadline:
+            remaining = max(0.0, deadline - time.monotonic())
+            readable, _, _ = select.select([fd], [], [], min(0.2, remaining))
+            if not readable:
                 if self._process.poll() is not None:
                     break
-                remaining = max(0.0, deadline - time.monotonic())
-                readable, _, _ = select.select([self._process.stdout], [], [], min(0.2, remaining))
-                if not readable:
-                    continue
-                line = self._process.stdout.readline().decode().strip()
-                if line.startswith("DBUS_SESSION_BUS_ADDRESS="):
-                    dbus_address = line.split("=", 1)[1]
-                elif line == "READY":
-                    got_ready = True
-                    break
-
-        # Wait for kwin to be ready (socket file appears)
-        socket_path = Path(runtime_dir) / self._socket_name
-        if not self._wait_for_socket(socket_path, timeout=10.0):
-            stderr = self._read_startup_log()
-            self.stop()
-            msg = f"KWin failed to start. stderr: {stderr}"
-            raise RuntimeError(msg)
-
-        if not got_ready:
-            stderr = self._read_startup_log()
-            self.stop()
-            msg = f"Session setup failed: did not receive READY signal. stderr: {stderr}"
-            raise RuntimeError(msg)
-
-        if self._home_dir is not None:
-            screenshot_dir = self._home_dir / ".screenshots"
-        else:
-            screenshot_dir = Path(tempfile.mkdtemp(prefix="kwin-mcp-screenshots-"))
-
-        self._info = SessionInfo(
-            dbus_address=dbus_address,
-            wayland_socket=self._socket_name,
-            kwin_pid=self._process.pid,
-            screenshot_dir=screenshot_dir,
-            home_dir=self._home_dir,
-        )
-        return self._info
+                continue
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break
+            pending += chunk
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                text = line.decode(errors="replace").strip()
+                if text.startswith("DBUS_SESSION_BUS_ADDRESS="):
+                    dbus_address = text.split("=", 1)[1]
+                elif text == "READY":
+                    if not dbus_address:
+                        raise RuntimeError("READY received without a D-Bus address")
+                    if self._process.poll() is not None:
+                        raise RuntimeError("Session exited during startup")
+                    return dbus_address
+            if len(pending) > 65536:
+                raise RuntimeError("Startup output exceeded the line length limit")
+        raise RuntimeError(f"No READY signal within {timeout:g}s (or session exited early)")
 
     def launch_app(self, command: list[str], extra_env: dict[str, str] | None = None) -> AppInfo:
         """Launch an application inside the isolated session.
@@ -283,6 +316,8 @@ class Session:
         env.update(self._xdg_isolation_env())
         if extra_env:
             env.update(extra_env)
+        if self._runtime_dir is not None:
+            env["XDG_RUNTIME_DIR"] = str(self._runtime_dir)
         if self._info.dbus_address:
             env["DBUS_SESSION_BUS_ADDRESS"] = self._info.dbus_address
 
@@ -342,29 +377,30 @@ class Session:
 
     def stop(self) -> None:
         """Stop the isolated session and clean up all processes."""
-        if self._process is None:
-            return
-
-        # Send SIGTERM to the entire process group (all children)
-        try:
-            pgid = os.getpgid(self._process.pid)
-            os.killpg(pgid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-
-        try:
-            self._process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            # Force kill the entire process group
+        if self._process is not None:
+            # Send SIGTERM to the entire process group (all children)
             try:
                 pgid = os.getpgid(self._process.pid)
-                os.killpg(pgid, signal.SIGKILL)
+                os.killpg(pgid, signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
                 pass
-            with contextlib.suppress(ProcessLookupError):
-                self._process.kill()
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                self._process.wait(timeout=3)
+
+            try:
+                self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # Force kill the entire process group
+                try:
+                    pgid = os.getpgid(self._process.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                with contextlib.suppress(ProcessLookupError):
+                    self._process.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    self._process.wait(timeout=3)
+
+            if self._process.stdout is not None:
+                self._process.stdout.close()
 
         # Clean up home directory and/or screenshot directory
         if self._home_dir is not None:
@@ -384,11 +420,12 @@ class Session:
             if not keep and self._info and self._info.screenshot_dir.exists():
                 shutil.rmtree(self._info.screenshot_dir, ignore_errors=True)
 
-        # Clean up socket files
-        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-        for suffix in ("", ".lock"):
-            path = Path(runtime_dir) / f"{self._socket_name}{suffix}"
-            path.unlink(missing_ok=True)
+        # Only remove socket files belonging to a successfully spawned wrapper.
+        if self._owns_socket and self._runtime_dir is not None:
+            for suffix in ("", ".lock"):
+                (self._runtime_dir / f"{self._socket_name}{suffix}").unlink(missing_ok=True)
+        self._owns_socket = False
+        self._runtime_dir = None
 
         self._process = None
         self._info = None
@@ -402,7 +439,8 @@ class Session:
         if self._startup_log is None:
             return ""
         self._startup_log.flush()
-        self._startup_log.seek(0)
+        self._startup_log.seek(0, os.SEEK_END)
+        self._startup_log.seek(max(0, self._startup_log.tell() - 16384))
         return self._startup_log.read().decode(errors="replace").strip()
 
     def _build_wrapper_script(self, config: SessionConfig, at_spi_launcher: str) -> str:
@@ -421,16 +459,21 @@ trap cleanup EXIT TERM INT HUP
 # Start the AT-SPI accessibility bus.
 # ATSPI_DBUS_IMPLEMENTATION is set in _build_env() to force dbus-daemon
 # instead of dbus-broker (which reuses the host's AT-SPI bus).
-{launcher} --launch-immediately &
+{launcher} --launch-immediately >&2 &
 AT_SPI_PID=$!
 sleep 0.2
+if ! kill -0 "$AT_SPI_PID" 2>/dev/null; then
+    echo "AT-SPI launcher exited before session startup" >&2
+    exit 1
+fi
 
 # Pre-set D-Bus activation environment BEFORE starting KWin.
 # When KWin triggers portal auto-activation, portal-kde will get
 # WAYLAND_DISPLAY pointing to our isolated compositor socket.
 # The socket doesn't exist yet, but portal-kde will be activated
 # only after KWin creates it.
-dbus-update-activation-environment WAYLAND_DISPLAY={self._socket_name} QT_QPA_PLATFORM=wayland
+dbus-update-activation-environment WAYLAND_DISPLAY={self._socket_name} \\
+    QT_QPA_PLATFORM=wayland >&2 || exit 1
 
 # Start KWin WITHOUT WAYLAND_DISPLAY to prevent nesting attempt.
 # KWin with --virtual creates its own compositor, it must not try
@@ -442,7 +485,7 @@ env -u WAYLAND_DISPLAY -u QT_QPA_PLATFORM \
     KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1 \
     kwin_wayland --virtual --no-lockscreen \
     --width {config.screen_width} --height {config.screen_height} \
-    --socket {self._socket_name} &
+    --socket {self._socket_name} >&2 &
 KWIN_PID=$!
 
 # Wait for KWin socket to appear
@@ -472,6 +515,7 @@ wait $KWIN_PID
         """Build the environment for the isolated session."""
         env = {
             **_sanitized_environment(),
+            "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"),
             "KDE_FULL_SESSION": "true",
             "KDE_SESSION_VERSION": "6",
             "XDG_SESSION_TYPE": "wayland",

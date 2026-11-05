@@ -720,10 +720,25 @@ def invoke_ui_action(
     action: Annotated[str, Field(description='AT-SPI action name, usually "click".')] = "click",
     app_name: Annotated[str, Field(description="Optional application-name filter.")] = "",
     match_index: Annotated[int, Field(description="Zero-based match to invoke.")] = 0,
+    required_states: Annotated[
+        list[str] | None,
+        Field(description="States required before dispatch; unmet states prevent the action."),
+    ] = None,
+    verify_states: Annotated[
+        list[str] | None,
+        Field(
+            description="States to observe on the same element after dispatch; no automatic retry."
+        ),
+    ] = None,
 ) -> str:
-    """Invoke a widget's native accessibility action."""
+    """Invoke a widget's native accessibility action, optionally verifying states."""
     return _engine.invoke_ui_action(
-        query=query, action=action, app_name=app_name, match_index=match_index
+        query=query,
+        action=action,
+        app_name=app_name,
+        match_index=match_index,
+        required_states=required_states,
+        verify_states=verify_states,
     )
 
 
@@ -760,19 +775,16 @@ def list_windows() -> str:
     return _engine.list_windows()
 
 
-@mcp.tool(description="Focus the first AT-SPI window matching an application name.")
+@mcp.tool(description="Focus an unambiguous AT-SPI window and check its focused state.")
 def focus_window(
     app_name: Annotated[
         str,
         Field(description="Application name to focus (case-insensitive substring match)."),
     ],
+    window_title: Annotated[str, Field(description="Optional exact AT-SPI window title.")] = "",
 ) -> str:
-    """Attempt to focus a window by application name.
-
-    Searches for an application whose name contains the given string
-    (case-insensitive) and activates its first focusable window via AT-SPI2.
-    """
-    return _engine.focus_window(app_name=app_name)
+    """Focus a unique window; ambiguous matches fail without dispatching input."""
+    return _engine.focus_window(app_name=app_name, window_title=window_title)
 
 
 # ── D-Bus tools ──────────────────────────────────────────────────────────
