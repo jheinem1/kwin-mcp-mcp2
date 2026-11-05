@@ -158,13 +158,13 @@ agent workflows and failures into repeatable regression tests before advertising
 new coverage.
 
 
-## Acceptance matrix still to run on an owned KDE test machine
+## Acceptance matrix and container follow-up
 
 | Control path | Foreground | Background | Minimized | Locked |
 | --- | --- | --- | --- | --- |
-| Exact-ID KWin activation | Not run | Not run | Not run | Not run; do not infer visible focus |
-| Named-output capture/mapping | Not run | Not run | Not run | Not run; retain permission denial |
-| AT-SPI action/state verification | Not run | Not run | Not run | Not run; no unlock |
+| Exact-ID KWin activation | Passed, duplicate-title GTK fixture | Passed, switches exact targets | Not run | Not run; do not infer visible focus |
+| Named-output capture/mapping | Inactive-renderer refusal verified; pixels/mapping unverified | Not run | Not run | Not run; retain permission denial |
+| AT-SPI actions | GTK click and Qt Press passed | GTK counter verified | GTK counter verified | Not run; no unlock |
 | Dolphin FileManager1 navigation | Not run | Not run | Not run | Not run; dispatch is not observation |
 
 Use disposable documents/directories and duplicate window titles. Record KWin,
@@ -178,3 +178,49 @@ Ruff lint/format, type checking with unresolved native imports excluded, docs
 consistency, and wheel/sdist builds. Generated KWin JavaScript is executed against
 a mocked workspace in Node when available. These are not compositor integration
 tests. Full source type checking is also exercised in dependency-equipped CI.
+
+
+## Inactive compositor capture failure and safeguard
+
+A disposable rootless Fedora 44 container tested KWin 6.8.2-3.fc44, Qt 6.11.2,
+GTK 3.24.52, libei 1.6.0 and AT-SPI 2.60.7. Private session startup, EIS
+initialization, exact-ID activation, and the semantic fixture outcomes above
+passed. This does not establish rendering or locked-session support.
+
+Before a screenshot, the safe D-Bus `/Compositor` `active` property was false
+both immediately and after two seconds. `supportInformation` reported
+VirtualBackend and "Compositing is not active". A minimal direct D-Bus
+`CaptureScreen` call, independent of MCP, crashed KWin with SIGSEGV at
+`ScreenShotDBusInterface2::CaptureScreen → takeScreenShot → RenderDevice::eglContext`.
+The same failure occurred through MCP. The container had neither `/dev/dri` nor
+`/dev/udmabuf`. Software EGL variables were then verified in the actual KWin
+process; compositing remained inactive and the direct call still crashed.
+This identifies a non-rendering container session and an unsafe compositor
+capture path, not an MCP request-encoding error.
+
+MCP now checks the safe `active` property before named-output capture, direct
+capture, bursts and Spectacle. Inactive or unverifiable compositing returns
+`UnsupportedCaptureError` before any screenshot request. It does not query
+`compositingType`, which can itself dereference a missing backend in this
+KWin version. A failed guard does not fall back to Spectacle or change settings.
+For input followed by a screenshot, the existing action/observation contract
+preserves the input result and reports observation failure without replaying it.
+
+This safeguard does not repair KWin's renderer or guarantee every active GL driver
+can capture. Actual screenshot pixels, coordinate mapping, rotation/hotplug and
+locked behavior still require a rendering-capable test environment. No host GPU,
+host bus/display, privileged container or live security bypass was used. The
+virtual-session wrapper uses `--no-lockscreen`, so it is not a locked-session test.
+
+For compositor experiments, `AutomationEngine.session_start(env=...)` configures
+the launched application, not KWin. Use the lower-level
+`SessionConfig(extra_env=...)` and verify only the intended renderer variables in
+the KWin process; do not infer inheritance from the parent shell.
+
+
+Container verification of the safeguard passed: named-output, regular and burst
+capture all refused safely. After each refusal KWin remained alive and responsive,
+and the same real GTK window UUID and output geometry were enumerable. No image
+was produced. Session shutdown and owned-container cleanup completed; pre-existing
+container and image ID sets were unchanged. Local regressions now total 81, and
+the guard commit passed both CI workflows including source type checking.

@@ -22,6 +22,8 @@ Read [Behavior, safety boundaries, and feature gaps](docs/BEHAVIOR_AND_GAPS.md)
 for the current action/retry contract, session isolation limits, screenshot
 coordinate metadata, and what has actually been tested. In particular:
 
+- Screenshot requests are refused when KWin compositing is inactive or cannot be
+  verified, protecting non-rendering sessions from a known compositor crash.
 - Capture failure after input does not mean the input failed. Do not repeat it
   without inspecting state.
 - Semantic actions can check state preconditions/postconditions; they do not
