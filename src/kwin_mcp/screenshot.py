@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import selectors
 import subprocess
@@ -16,6 +17,44 @@ import dbus.bus
 
 _CAPTURE_TIMEOUT = 10.0
 _MAX_CAPTURE_BYTES = 256 * 1024 * 1024
+
+
+class UnsupportedCaptureError(RuntimeError):
+    """Capture was withheld because compositing is inactive or unverifiable."""
+
+
+def require_active_compositing(dbus_address: str) -> None:
+    """Check the safe active property before asking KWin or Spectacle to capture.
+
+    KWin 6.8.2 can accept Wayland/input clients without a render device, then
+    crash inside ScreenShot2. Even querying compositingType can dereference its
+    missing backend, so only query active. Never change renderer/security settings.
+    A successful check is not a guarantee against unrelated compositor bugs.
+    """
+    bus = None
+    try:
+        bus = (
+            dbus.bus.BusConnection(dbus_address) if dbus_address else dbus.SessionBus(private=True)
+        )
+        proxy = bus.get_object("org.kde.KWin", "/Compositor", introspect=False)
+        properties = dbus.Interface(proxy, "org.freedesktop.DBus.Properties")
+        active = bool(properties.Get("org.kde.kwin.Compositing", "active", timeout=3.0))
+    except Exception as exc:
+        raise UnsupportedCaptureError(
+            "Screenshot not attempted: could not verify that KWin compositing is active. "
+            "Use accessibility observation and inspect compositor startup diagnostics."
+        ) from exc
+    finally:
+        if bus is not None:
+            with contextlib.suppress(Exception):
+                bus.close()
+    if not active:
+        raise UnsupportedCaptureError(
+            "Screenshot not attempted: KWin compositing is inactive. "
+            "The session may accept windows/input without a working render device; "
+            "capture can crash KWin in that state. Use accessibility observation "
+            "or a separately configured rendering-capable test environment."
+        )
 
 
 def screenshot_metadata(path: Path) -> dict:
@@ -167,6 +206,7 @@ def capture_screenshot_dbus(
     """
     from PIL import Image
 
+    require_active_compositing(dbus_address)
     bus = dbus.bus.BusConnection(dbus_address)
     screenshot_obj = bus.get_object("org.kde.KWin", "/org/kde/KWin/ScreenShot2")
     iface = dbus.Interface(screenshot_obj, "org.kde.KWin.ScreenShot2")
@@ -212,6 +252,7 @@ def capture_frame_burst(
     Returns:
         List of paths to the captured PNG files, ordered by delay.
     """
+    require_active_compositing(dbus_address)
     output_dir.mkdir(parents=True, exist_ok=True)
     sorted_delays = sorted(delays_ms)
 
@@ -320,6 +361,7 @@ def _capture_via_spectacle(
     include_cursor: bool = False,
 ) -> None:
     """Capture screenshot using spectacle CLI in background mode."""
+    require_active_compositing(dbus_address)
     cmd = ["spectacle", "-b", "-f", "-n", "-o", str(output_path)]
     if include_cursor:
         cmd.append("-p")
@@ -366,6 +408,7 @@ def capture_output_dbus(
 
     if not output_name:
         raise ValueError("An exact output name is required")
+    require_active_compositing(dbus_address)
     bus = dbus.bus.BusConnection(dbus_address)
     try:
         obj = bus.get_object("org.kde.KWin", "/org/kde/KWin/ScreenShot2")

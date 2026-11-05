@@ -28,6 +28,63 @@ class ScreenshotTests(unittest.TestCase):
         self.unix_fd.start()
         self.addCleanup(self.unix_fd.stop)
 
+    def test_capture_preflight_checks_only_safe_active_property(self) -> None:
+        for active in (True, False):
+            bus = mock.Mock()
+            props = mock.Mock()
+            props.Get.return_value = active
+            with (
+                mock.patch.object(
+                    screenshot.dbus.bus, "BusConnection", return_value=bus, create=True
+                ),
+                mock.patch.object(screenshot.dbus, "Interface", return_value=props, create=True),
+            ):
+                if active:
+                    screenshot.require_active_compositing("private")
+                else:
+                    with self.assertRaisesRegex(screenshot.UnsupportedCaptureError, "inactive"):
+                        screenshot.require_active_compositing("private")
+            props.Get.assert_called_once_with("org.kde.kwin.Compositing", "active", timeout=3.0)
+            bus.close.assert_called_once()
+
+    def test_unverifiable_compositor_fails_closed(self) -> None:
+        with (
+            mock.patch.object(
+                screenshot.dbus.bus,
+                "BusConnection",
+                side_effect=RuntimeError("unreachable"),
+                create=True,
+            ),
+            self.assertRaisesRegex(screenshot.UnsupportedCaptureError, "could not verify"),
+        ):
+            screenshot.require_active_compositing("private")
+
+    def test_every_capture_route_stops_before_dispatch_if_inactive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            calls = [
+                lambda: screenshot.capture_screenshot_to_file("private", output_dir=output),
+                lambda: screenshot.capture_screenshot_dbus("private", output / "direct.png"),
+                lambda: screenshot.capture_output_dbus(
+                    "private", "Virtual-0", output / "named.png"
+                ),
+                lambda: screenshot.capture_frame_burst("private", output, [0]),
+            ]
+            for call in calls:
+                with (
+                    mock.patch.object(
+                        screenshot,
+                        "require_active_compositing",
+                        side_effect=screenshot.UnsupportedCaptureError("inactive"),
+                    ),
+                    mock.patch.object(screenshot, "_capture_raw") as raw,
+                    mock.patch.object(screenshot.subprocess, "run") as run,
+                    self.assertRaises(screenshot.UnsupportedCaptureError),
+                ):
+                    call()
+                raw.assert_not_called()
+                run.assert_not_called()
+
     def test_large_frame_drains_before_dbus_reply(self) -> None:
         data = bytes(1024 * 1024)
 
