@@ -69,10 +69,54 @@ pipe deadlocks. Each capture has a ten-second deadline, a 256 MiB size limit, an
 validates the expected pixel length. Frame scheduling is best effort, not a
 real-time guarantee. A burst can take longer than one capture deadline.
 
+## Exact window IDs and named-output coordinates
+
+`kwin_windows` uses a short-lived KWin 6 script to return compositor internal
+UUIDs, captions, logical window rectangles, output names, and logical output
+geometry/scale. `activate_window(window_id)` targets only that UUID and observes
+whether KWin's active-window property changed. This is not proof that a locked
+desktop is visible, that a minimized application rendered, or that an app accepted
+subsequent input. Unknown IDs fail without title matching. The script is unloaded
+after the request; cleanup errors and uncertain activation outcomes are reported.
+
+`screenshot_output(output_name)` calls ScreenShot2 CaptureScreen for exactly the
+named output, with no whole-desktop fallback. It reads layout before and after
+capture. Stable layout produces a capture ID usable for 60 seconds in the same
+session. `map_screenshot_point(capture_id, x, y)` rechecks layout and maps the
+image pixel center to global logical coordinates without dispatching input.
+Receipts are bounded to 32. Negative origins, fractional scales, and other outputs
+with different scales are covered by mathematical regressions. Changed output
+layout, disconnected outputs, expired receipts, and out-of-image points fail.
+
+This relies on CaptureScreen returning the named output in displayed orientation.
+Rotated-output, fractional-DPI, and hotplug behavior still need real compositor
+acceptance. A layout can also change after mapping and before separate input.
+Prefer semantic actions for consequential operations. Existing whole-desktop
+screenshots and bursts do not acquire a global transform.
+
+## Native file-manager adapter and browser boundaries
+
+`file_manager_show(paths, action="show_items")` calls the standard
+org.freedesktop.FileManager1 ShowItems method. Use `show_folders` to open folders.
+Only explicit local absolute paths are accepted, at most 32 per request. URI
+escaping is handled internally; remote URIs and traversal components are rejected.
+Dolphin implements this interface, but the session's registered file manager may
+be another application. A request may launch a window. D-Bus acceptance does not
+prove selection, focus, rendering, path existence, or a lock-screen transition.
+There is no automatic retry after an uncertain result.
+
+Firefox and Electron applications (Discord, T3 Code, Steam, and Nook) continue
+through generic AT-SPI and input where exposed. No browser debugging port,
+extension grant, authentication bypass, or application-specific private protocol
+is enabled. Future browser adapters should attach only to a deliberately
+authorized browser automation session, scope access to requested pages, verify
+page identity immediately before actions, and observe app-specific postconditions.
+A separate Discord bridge's locked observation is not evidence that this server
+supports locked actions.
+
 ## Current feature gaps
 
-- Exact KWin window IDs, geometry/scale enumeration, and verified activation by ID.
-- Reliable screenshot-to-global coordinate transforms, especially mixed DPI.
+- Whole-desktop mixed-DPI transforms, and live validation of named-output mapping.
 - Rich app adapters, stable semantic locators across UI changes, and app-specific
   postconditions. Current support is generic AT-SPI, input, clipboard and D-Bus.
 - Universal background/minimized control. EIS is focus-based; AT-SPI coverage and
@@ -96,8 +140,12 @@ passes only with unresolved native imports excluded locally
 D-Bus bindings. CI installs the native development libraries before its full
 source type check. The unit-test job installs Pillow for image metadata tests.
 
-The development container has no `kwin_wayland`. Native dependency installation
-also fails because Cairo development libraries are absent. Real compositor,
+A subsequent non-root setup extracted official Debian KWin 6.3.6, Qt 6.8.2,
+libei 1.3.901 and native D-Bus/AT-SPI bindings. Version/import checks passed.
+Actual startup is blocked earlier: this environment denies AF_UNIX socket
+creation with EPERM, so dbus-run-session cannot start, including under the
+narrowly scoped execution approval. No socket or security restriction was
+bypassed. Real compositor,
 GTK/Qt app, background, minimized, and locked-session acceptance checks have not
 been run in this environment. Do not treat historical milestone checkmarks in
 ROADMAP.md as verification of this fork on current Plasma releases.
@@ -108,3 +156,25 @@ and reproduction steps. Test locks only in an owned disposable session; retain
 the expected denial rather than weakening authentication. Promote successful
 agent workflows and failures into repeatable regression tests before advertising
 new coverage.
+
+
+## Acceptance matrix still to run on an owned KDE test machine
+
+| Control path | Foreground | Background | Minimized | Locked |
+| --- | --- | --- | --- | --- |
+| Exact-ID KWin activation | Not run | Not run | Not run | Not run; do not infer visible focus |
+| Named-output capture/mapping | Not run | Not run | Not run | Not run; retain permission denial |
+| AT-SPI action/state verification | Not run | Not run | Not run | Not run; no unlock |
+| Dolphin FileManager1 navigation | Not run | Not run | Not run | Not run; dispatch is not observation |
+
+Use disposable documents/directories and duplicate window titles. Record KWin,
+toolkit and application versions. Compare named-output screenshots with measured
+logical geometry at 100%, 150%, and 200% scale, negative origins, rotated outputs
+and hotplug. Test locks only through the normal lock/unlock UI with the owner.
+Never enable live permission bypasses to make a test pass.
+
+The follow-up implementation passes 78 local unit regressions, repository-wide
+Ruff lint/format, type checking with unresolved native imports excluded, docs
+consistency, and wheel/sdist builds. Generated KWin JavaScript is executed against
+a mocked workspace in Node when available. These are not compositor integration
+tests. Full source type checking is also exercised in dependency-equipped CI.

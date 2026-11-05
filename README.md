@@ -26,8 +26,14 @@ coordinate metadata, and what has actually been tested. In particular:
   without inspecting state.
 - Semantic actions can check state preconditions/postconditions; they do not
   prove arbitrary app outcomes. Exact-title AT-SPI focus rejects ambiguity.
-- Screenshot pixel dimensions are reported, but global scale/origin mapping and
-  exact KWin window-ID targeting remain gaps.
+- `kwin_windows` lists exact compositor IDs and output geometry;
+  `activate_window` targets an ID without guessing by title.
+- `screenshot_output` and `map_screenshot_point` map a named output's pixels
+  to logical coordinates while its layout remains unchanged. Whole-desktop
+  screenshots still have no automatic mixed-DPI transform.
+- `file_manager_show` opens local items/folders through Dolphin's standard
+  FileManager1 interface (or the registered alternative), reporting dispatch
+  separately from unverified UI state.
 - Background, minimized, locked and private-session support varies by control
   path and application; this is not universal unattended app control.
 

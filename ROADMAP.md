@@ -56,8 +56,10 @@ matrix for this fork.
 - [x] Ambiguity-safe AT-SPI focus and optional semantic state verification.
 - [x] Separate action dispatch from screenshot observation failures.
 - [x] Report screenshot dimensions and explicitly unknown coordinate transforms.
-- [ ] Exact KWin window IDs and verified activation/geometry lookup.
-- [ ] Mixed-DPI screenshot-to-input coordinate transforms.
+- [x] Exact KWin UUID listing and activation/geometry implementation (mocked tests).
+- [x] Layout-checked named-output coordinate mapping (mathematical tests).
+- [ ] Whole-desktop mixed-DPI mapping and real named-output acceptance.
+- [x] Bounded FileManager1 navigation adapter with honest dispatch receipts.
 - [ ] App adapters with durable postconditions and real KDE integration tests.
 - [ ] Verify foreground/background/minimized/locked/isolated behavior per app.
 

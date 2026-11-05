@@ -85,6 +85,8 @@ Key style rules:
 
 ## Regression tests without KDE
 
+Install Pillow first (`python -m pip install "Pillow>=10.0.0"`). Node.js is
+optional for generated KWin script logic tests; those tests skip if it is absent.
 `PYTHONPATH=src python -m unittest discover -s tests` runs the mocked unit
 regressions without a desktop session. These tests do not replace real KWin,
 AT-SPI and input integration tests. See [behavior and gaps](docs/BEHAVIOR_AND_GAPS.md)
