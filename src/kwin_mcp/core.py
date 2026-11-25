@@ -376,6 +376,15 @@ class AutomationEngine:
         result = run_window_operation("activate", window_id=window_id, env=self._session_env())
         return _untrusted_text("KWin activation", json.dumps(result))
 
+    def file_manager_show(self, paths: list[str], action: str = "show_items") -> str:
+        """Show local items/folders using the session's default FileManager1 provider."""
+        from kwin_mcp.adapters import show_local_paths
+
+        info = self._get_session().info
+        if info is None:
+            raise RuntimeError("No session info available")
+        return json.dumps(show_local_paths(info.dbus_address, paths, action=action))
+
     def accessibility_tree(
         self,
         app_name: str = "",

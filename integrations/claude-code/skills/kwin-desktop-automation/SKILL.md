@@ -36,6 +36,14 @@ use only when foreground activation is intended. Check the returned
 `verified_active` result; if the outcome is uncertain, list windows before any
 retry. This is not background input or a way around the lock screen.
 
+## File manager navigation
+
+Use `file_manager_show` to reveal local absolute paths (`show_items`) or open
+folders (`show_folders`) via the current session's FileManager1 provider. It
+may open or focus a window. A dispatch reply does not establish visible
+selection; observe the file manager before reporting the effect or retrying an
+uncertain request.
+
 ## Games and locked cursors
 
 The customized `jheinem1/kwin-mcp-mcp2` server provides these controls starting
