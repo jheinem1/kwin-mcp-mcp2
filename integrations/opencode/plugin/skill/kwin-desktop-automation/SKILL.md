@@ -28,6 +28,22 @@ description: Control KDE Plasma 6 Wayland applications through kwin-mcp. Use for
 - Do not use `dbus_call` on a live session unless the requested operation requires it.
 - Clean retained screenshot or isolated-home directories when they are no longer needed.
 
+## Exact window targeting
+
+Use `kwin_windows` to disambiguate duplicate titles and obtain the exact
+compositor UUID. `activate_window(window_id)` changes focus if KWin permits it;
+use only when foreground activation is intended. Check the returned
+`verified_active` result; if the outcome is uncertain, list windows before any
+retry. This is not background input or a way around the lock screen.
+
+## File manager navigation
+
+Use `file_manager_show` to reveal local absolute paths (`show_items`) or open
+folders (`show_folders`) via the current session's FileManager1 provider. It
+may open or focus a window. A dispatch reply does not establish visible
+selection; observe the file manager before reporting the effect or retrying an
+uncertain request.
+
 ## Games and locked cursors
 
 The customized `jheinem1/kwin-mcp-mcp2` server provides these controls starting
