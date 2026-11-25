@@ -249,13 +249,14 @@ kwin-mcp-cli --default-live-session
 |------|-----------|-------------|
 | `wait_for_element` | `query` `str`, `app_name?` `str`, `timeout_ms?` `int` (5000), `poll_interval_ms?` `int` (200), `expected_states?` `list[str]`, `limit?` `int` (50) | Wait for bounded AT-SPI matches. |
 
-### Advanced (3 tools)
+### Advanced (4 tools)
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `dbus_call` | `service` `str`, `path` `str`, `interface` `str`, `method` `str`, `args?` `list[str]` | Call session D-Bus. In live mode this may affect the real desktop. |
 | `read_app_log` | `pid` `int`, `last_n_lines?` `int` (50) | Read stdout/stderr output of a launched app by PID. Set `last_n_lines=0` for all output. |
 | `wayland_info` | `filter_protocol?` `str` | List Wayland protocols available in the session. Useful for verifying protocol access (e.g., `plasma_window_management`). |
+| `file_manager_show` | `paths` `list[str]`, `action?` `str` | Reveal local absolute paths with the current session's FileManager1 provider; `show_folders` opens folders. Dispatch is not proof of selection; the provider may open or focus a window. |
 
 > **Frame capture:** Many action tools accept an optional `screenshot_after_ms` parameter (e.g., `[0, 50, 100, 200, 500]`) that captures screenshots at specified delays (in milliseconds) after the action completes. This is useful for observing transient UI states like hover effects, click animations, and menu transitions without extra MCP round-trips. Frame capture uses the fast KWin ScreenShot2 D-Bus interface (~30-70ms per frame).
 

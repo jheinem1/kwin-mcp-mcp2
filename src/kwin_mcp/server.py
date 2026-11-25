@@ -799,6 +799,12 @@ def activate_window(window_id: str) -> str:
     return _engine.activate_window(window_id)
 
 
+@mcp.tool(description="Show local items or folders through the default desktop file manager.")
+def file_manager_show(paths: list[str], action: str = "show_items") -> str:
+    """Dispatch FileManager1 navigation; acceptance does not verify visible selection."""
+    return _engine.file_manager_show(paths, action)
+
+
 # ── D-Bus tools ──────────────────────────────────────────────────────────
 
 
