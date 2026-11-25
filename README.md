@@ -233,13 +233,15 @@ kwin-mcp-cli --default-live-session
 | `clipboard_get` | _(none)_ | Read the current clipboard text content. Requires `enable_clipboard=true` in `session_start` and `wl-clipboard` installed. |
 | `clipboard_set` | `text` `str` | Set the clipboard text content. Same requirements as `clipboard_get`. |
 
-### Window Management (3 tools)
+### Window Management (5 tools)
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `launch_app` | `command` `str`, `env?` `dict` | Launch an application inside the running session. Returns PID and log path. |
 | `list_windows` | _(none)_ | List all accessible application windows with per-window titles and active/focused state markers via AT-SPI2 |
 | `focus_window` | `app_name` `str` | Focus a window by application name (case-insensitive match) |
+| `kwin_windows` | _(none)_ | List exact compositor window UUIDs, geometry, state and logical outputs. Labels are untrusted. |
+| `activate_window` | `window_id` `str` | Request focus by exact UUID; distinguish dispatch from observed activation. In live mode this can change focus. |
 
 ### UI Polling (1 tool)
 

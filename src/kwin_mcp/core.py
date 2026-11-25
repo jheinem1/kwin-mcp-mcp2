@@ -362,6 +362,20 @@ class AutomationEngine:
         size_kb = path.stat().st_size / 1024
         return f"Screenshot saved: {path} ({size_kb:.1f} KB)"
 
+    def kwin_windows(self) -> str:
+        """List compositor window IDs and output geometry, not accessibility titles."""
+        from kwin_mcp.windows import run_window_operation
+
+        result = run_window_operation("list", env=self._session_env())
+        return _untrusted_text("KWin window metadata", json.dumps(result))
+
+    def activate_window(self, window_id: str) -> str:
+        """Request exact-ID activation; report verification separately from dispatch."""
+        from kwin_mcp.windows import run_window_operation
+
+        result = run_window_operation("activate", window_id=window_id, env=self._session_env())
+        return _untrusted_text("KWin activation", json.dumps(result))
+
     def accessibility_tree(
         self,
         app_name: str = "",
