@@ -6,14 +6,18 @@ import contextlib
 import os
 import selectors
 import subprocess
+import sys
 import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import dbus
 import dbus.bus
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 _CAPTURE_TIMEOUT = 10.0
 _MAX_CAPTURE_BYTES = 256 * 1024 * 1024
@@ -134,6 +138,43 @@ def _capture_raw(iface: Any, options: dict, *, timeout: float = _CAPTURE_TIMEOUT
     return data, results
 
 
+def _decode_capture(data: bytes, results: dict) -> Image.Image:
+    """Decode ScreenShot2's reported QImage format instead of guessing byte order.
+
+    Qt formats 4 to 6 are native-endian packed pixels. Formats 16 to 18 are byte
+    ordered on every architecture. Lowercase 'a' tells Pillow to undo alpha
+    premultiplication when it converts into straight RGBA for PNG.
+    """
+    from PIL import Image
+
+    if not data:
+        raise RuntimeError("KWin ScreenShot2 returned no data")
+    try:
+        width = int(results["width"])
+        height = int(results["height"])
+        stride = int(results["stride"])
+        format_code = int(results["format"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("KWin ScreenShot2 returned invalid image metadata") from exc
+    if width <= 0 or height <= 0 or stride < 4 * width or len(data) != stride * height:
+        raise RuntimeError("KWin ScreenShot2 returned inconsistent raw image dimensions")
+
+    little = sys.byteorder == "little"
+    modes = {
+        4: ("RGB", "BGRX" if little else "XRGB"),  # Format_RGB32
+        5: ("RGBA", "BGRA" if little else "ARGB"),  # Format_ARGB32
+        6: ("RGBA", "BGRa") if little else ("RGBa", "aRGB"),  # Format_ARGB32_Premultiplied
+        16: ("RGB", "RGBX"),  # Format_RGBX8888
+        17: ("RGBA", "RGBA"),  # Format_RGBA8888
+        18: ("RGBA", "RGBa"),  # Format_RGBA8888_Premultiplied
+    }
+    if format_code not in modes:
+        raise RuntimeError(f"KWin ScreenShot2 returned unsupported QImage format {format_code}")
+    mode, raw_mode = modes[format_code]
+    image = Image.frombytes(mode, (width, height), data, "raw", raw_mode, stride)
+    return image.convert("RGBA") if mode == "RGBa" else image
+
+
 def capture_screenshot_to_file(
     dbus_address: str = "",
     wayland_socket: str = "",
@@ -191,8 +232,6 @@ def capture_screenshot_dbus(
     Returns:
         The output_path with the saved PNG file.
     """
-    from PIL import Image
-
     require_active_compositing(dbus_address)
     bus = dbus.bus.BusConnection(dbus_address)
     screenshot_obj = bus.get_object("org.kde.KWin", "/org/kde/KWin/ScreenShot2")
@@ -200,17 +239,7 @@ def capture_screenshot_dbus(
 
     options = {"include-cursor": dbus.Boolean(include_cursor)}
     data, results = _capture_raw(iface, options)
-    if not data:
-        msg = "KWin ScreenShot2 returned no data"
-        raise RuntimeError(msg)
-
-    width = int(results["width"])
-    height = int(results["height"])
-    stride = int(results["stride"])
-
-    # KWin returns raw ARGB32_Premultiplied (Qt format 6) in native byte order.
-    # On little-endian systems, bytes are stored as BGRA.
-    img = Image.frombytes("RGBA", (width, height), data, "raw", "BGRA", stride)
+    img = _decode_capture(data, results)
     img.save(output_path, "PNG")
     return output_path
 
@@ -268,8 +297,6 @@ def _capture_frame_burst_dbus(
     include_cursor: bool = False,
 ) -> list[Path]:
     """Capture frames using fast KWin ScreenShot2 D-Bus interface."""
-    from PIL import Image
-
     # Reuse a single D-Bus connection for all captures
     bus = dbus.bus.BusConnection(dbus_address)
     screenshot_obj = bus.get_object("org.kde.KWin", "/org/kde/KWin/ScreenShot2")
@@ -277,7 +304,7 @@ def _capture_frame_burst_dbus(
     options = {"include-cursor": dbus.Boolean(include_cursor)}
 
     # Phase 1: Capture all raw frames with accurate timing
-    raw_frames: list[tuple[bytes, int, int, int]] = []  # (data, width, height, stride)
+    raw_frames: list[tuple[bytes, dict]] = []
     start = time.monotonic()
     for delay_ms in sorted_delays:
         target_time = start + delay_ms / 1000.0
@@ -285,27 +312,16 @@ def _capture_frame_burst_dbus(
         if now < target_time:
             time.sleep(target_time - now)
 
-        data, results = _capture_raw(iface, options)
-
-        raw_frames.append(
-            (
-                data,
-                int(results["width"]),
-                int(results["height"]),
-                int(results["stride"]),
-            )
-        )
+        raw_frames.append(_capture_raw(iface, options))
 
     # Phase 2: Convert raw frames to PNG (timing-insensitive)
     frame_paths: list[Path] = []
-    for i, (delay_ms, (data, width, height, stride)) in enumerate(
-        zip(sorted_delays, raw_frames, strict=True)
-    ):
+    for i, (delay_ms, (data, results)) in enumerate(zip(sorted_delays, raw_frames, strict=True)):
         if not data:
             msg = f"KWin ScreenShot2 returned no data for frame at {delay_ms}ms"
             raise RuntimeError(msg)
         frame_path = output_dir / f"frame_{uuid.uuid4().hex[:8]}_{i:03d}_{delay_ms}ms.png"
-        img = Image.frombytes("RGBA", (width, height), data, "raw", "BGRA", stride)
+        img = _decode_capture(data, results)
         img.save(frame_path, "PNG")
         frame_paths.append(frame_path)
 
