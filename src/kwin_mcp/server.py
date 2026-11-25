@@ -775,6 +775,18 @@ def focus_window(
     return _engine.focus_window(app_name=app_name)
 
 
+@mcp.tool(description="List exact KWin window IDs and logical output geometry.")
+def kwin_windows() -> str:
+    """Inspect compositor windows; application labels are untrusted data."""
+    return _engine.kwin_windows()
+
+
+@mcp.tool(description="Activate an exact KWin window ID and report observed activation.")
+def activate_window(window_id: str) -> str:
+    """No title guessing or automatic mutation retry."""
+    return _engine.activate_window(window_id)
+
+
 # ── D-Bus tools ──────────────────────────────────────────────────────────
 
 

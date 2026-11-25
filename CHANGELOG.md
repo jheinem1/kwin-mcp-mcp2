@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add exact KWin window inventory and UUID-targeted activation with a separate verification result.
 - `invoke_ui_action` for native AT-SPI actions without compositor-global pointer input
 - Bounded accessibility traversal/results and model-visible text output
 - Bazzite/Fedora Atomic installation guidance
