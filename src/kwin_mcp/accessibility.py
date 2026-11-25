@@ -18,6 +18,12 @@ import gi
 gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi  # noqa: E402
 
+from kwin_mcp.window_accessibility import (  # noqa: E402
+    MAX_APPLICATIONS,
+    MAX_TOP_LEVELS,
+    match_window_peer,
+)
+
 _DEFAULT_MAX_DEPTH = 8
 _DEFAULT_MAX_NODES = 200
 _DEFAULT_RESULT_LIMIT = 50
@@ -512,6 +518,172 @@ def _extract_info(element: Atspi.Accessible, depth: int) -> ElementInfo:
     )
 
 
+_WINDOW_ROOT_ROLES = {"frame", "window", "dialog", "alert"}
+_WINDOW_LABEL_ROLES = {
+    "button",
+    "push button",
+    "check box",
+    "radio button",
+    "toggle button",
+    "menu item",
+    "check menu item",
+    "radio menu item",
+    "label",
+    "heading",
+}
+_WINDOW_PRIVATE_ROLES = {
+    "edit bar",
+    "entry",
+    "password text",
+    "text",
+    "terminal",
+    "document",
+    "document text",
+    "document web",
+    "document email",
+}
+
+
+def _window_root_size(window: Atspi.Accessible) -> tuple[int, int] | None:
+    component = window.get_component_iface()
+    if component is None:
+        return None
+    extent = component.get_extents(Atspi.CoordType.WINDOW)
+    if extent.width <= 0 or extent.height <= 0:
+        return None
+    return int(extent.width), int(extent.height)
+
+
+def _resolve_exact_window(target: dict[str, Any]) -> tuple[Atspi.Accessible, str] | None:
+    pid, title = target.get("pid"), target.get("caption")
+    if type(pid) is not int or pid <= 0 or not isinstance(title, str) or not 0 < len(title) <= 2048:
+        return None
+    desktop = Atspi.get_desktop(0)
+    if desktop is None:
+        return None
+    n_apps = desktop.get_child_count()
+    if not 0 <= n_apps <= MAX_APPLICATIONS:
+        return None
+    apps = []
+    for i in range(n_apps):
+        app = desktop.get_child_at_index(i)
+        if app is None:
+            return None
+        if app.get_process_id() == pid:
+            apps.append(app)
+    if len(apps) != 1:
+        return None
+    app = apps[0]
+    n_windows = app.get_child_count()
+    if not 0 <= n_windows <= MAX_TOP_LEVELS:
+        return None
+    candidates = []
+    for j in range(n_windows):
+        window = app.get_child_at_index(j)
+        if window is None:
+            return None
+        if (
+            (window.get_role_name() or "").casefold() in _WINDOW_ROOT_ROLES
+            and window.get_name() == title
+            and window.get_process_id() == pid
+        ):
+            candidates.append(window)
+    peers = target.get("peers")
+    if not isinstance(peers, list) or len(candidates) != len(peers):
+        return None
+    toolkit = ""
+    sizes: list[tuple[int, int] | None] = [None] * len(candidates)
+    if len(candidates) > 1:
+        name = (app.get_toolkit_name() or "").casefold()
+        version = app.get_toolkit_version() or ""
+        if name in {"gtk", "gtk+"} and version.startswith("3."):
+            toolkit = "gtk3"
+            sizes = [_window_root_size(w) for w in candidates]
+    result = match_window_peer(target, sizes, toolkit)
+    return (candidates[result[0]], result[1]) if result is not None else None
+
+
+def _snapshot_window_node(
+    node: Atspi.Accessible,
+    *,
+    depth: int,
+    max_depth: int,
+    budget: TraversalBudget,
+    include_labels: bool,
+) -> dict:
+    budget.visited += 1
+    role = (node.get_role_name() or "unknown").casefold()[:64]
+    state_set = node.get_state_set()
+    states = sorted(state.value_nick for state in Atspi.StateType if state_set.contains(state))
+    meta: dict[str, Any] = {
+        "index": budget.visited,
+        "role": role,
+        "states": states,
+        "children": [],
+    }
+    # No values, text interfaces or descriptions. Omit the entire subtree of
+    # editable/secret/document nodes; names may themselves contain contents.
+    if role in _WINDOW_PRIVATE_ROLES or "editable" in states or "protected" in states:
+        meta["redacted"] = True
+        return meta
+    if include_labels and depth > 0 and role in _WINDOW_LABEL_ROLES:
+        name = node.get_name()
+        if name:
+            meta["label"] = name[:120]
+    children = node.get_child_count()
+    if children < 0:
+        raise RuntimeError("AT-SPI window subtree became unavailable")
+    if depth >= max_depth:
+        budget.truncated |= children > 0
+        return meta
+    for i in range(children):
+        if budget.visited >= budget.max_nodes:
+            budget.truncated = True
+            break
+        child = node.get_child_at_index(i)
+        if child is None:
+            raise RuntimeError("AT-SPI window subtree changed during collection")
+        meta["children"].append(
+            _snapshot_window_node(
+                child,
+                depth=depth + 1,
+                max_depth=max_depth,
+                budget=budget,
+                include_labels=include_labels,
+            )
+        )
+    return meta
+
+
+def get_window_accessibility(
+    target: dict[str, Any],
+    *,
+    max_depth: int,
+    max_nodes: int,
+    include_labels: bool,
+) -> dict:
+    """Resolve an exact accessible top-level and inspect only its read-only subtree."""
+    match = _resolve_exact_window(target)
+    if match is None:
+        return {"status": "unsupported", "reason": "Exact accessible window could not be proven"}
+    window, method = match
+    budget = TraversalBudget(max_nodes)
+    tree = _snapshot_window_node(
+        window, depth=0, max_depth=max_depth, budget=budget, include_labels=include_labels
+    )
+    afterward = _resolve_exact_window(target)
+    if afterward is None or afterward[0] != window or afterward[1] != method:
+        return {"status": "unsupported", "reason": "Accessible window identity changed"}
+    return {
+        "status": "ok",
+        "window_id": target["window_id"],
+        "match": method,
+        "labels_included": include_labels,
+        "truncated": budget.truncated,
+        "tree": tree,
+    }
+
+
 # ── CLI entrypoint for subprocess execution ──────────────────────────────
 
 
@@ -550,6 +722,25 @@ def _handle_request(request: dict) -> dict:
         except TimeoutError as exc:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "result": [asdict(e) for e in elements]}
+
+    if op == "window_accessibility":
+        target = request.get("target")
+        max_depth = request.get("max_depth")
+        max_nodes = request.get("max_nodes")
+        include_labels = request.get("include_labels")
+        if (
+            not isinstance(target, dict)
+            or type(max_depth) is not int
+            or not 0 <= max_depth <= 12
+            or type(max_nodes) is not int
+            or not 1 <= max_nodes <= 200
+            or type(include_labels) is not bool
+        ):
+            return {"ok": False, "error": "Invalid bounded window accessibility request"}
+        result = get_window_accessibility(
+            target, max_depth=max_depth, max_nodes=max_nodes, include_labels=include_labels
+        )
+        return {"ok": True, "result": json.dumps(result)}
 
     if op == "list_windows":
         return {"ok": True, "result": list_windows()}

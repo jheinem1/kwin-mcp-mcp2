@@ -191,6 +191,84 @@ function callDBus(dest,path,iface,method,value) {console.log(value);}
                 self.assertEqual(scripting.unloadScript.call_args.kwargs["timeout"], 1.0)
                 bus.close.assert_called_once()
 
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise KWin script logic")
+    def test_atspi_target_uses_exact_process_title_group_without_touching_focus(self) -> None:
+        setup = """
+const a = {internalId:"{01a8db17-e9d8-4d1f-8ba9-741e22b2ff14}", pid:101,
+caption:"Same exact title", clientGeometry:{x:0,y:0,width:250,height:125}};
+const b = {...a, internalId:"{10a8db17-e9d8-4d1f-8ba9-741e22b2ff14}"};
+const c = {...a, internalId:"{20a8db17-e9d8-4d1f-8ba9-741e22b2ff14}", pid:102};
+const d = {...a, internalId:"{30a8db17-e9d8-4d1f-8ba9-741e22b2ff14}", caption:"Other"};
+const workspace = {windowList:()=>[c,b,d,a], screens:[],
+    get activeWindow(){throw Error("Unexpected read of focus");},
+    set activeWindow(_){throw Error("Unexpected write of focus");}};
+function callDBus(dest,path,iface,method,value) {console.log(value);}
+"""
+        proc = subprocess.run(
+            ["node", "-e", setup + windows._script("atspi_target", _ID, ":1.23")],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload["ok"])
+        target = payload["result"]
+        self.assertEqual(target["pid"], 101)
+        self.assertEqual(target["caption"], "Same exact title")
+        self.assertEqual(
+            [x["window_id"] for x in target["peers"]],
+            [
+                _ID,
+                "10a8db17-e9d8-4d1f-8ba9-741e22b2ff14",
+            ],
+        )
+
+    def test_locked_or_unverifiable_live_window_snapshot_never_loads_script(self) -> None:
+        for outcome in (True, TypeError("unexpected result")):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                bus = mock.Mock()
+                bus.get_name_owner.side_effect = [":1.10", ":1.11"]
+                iface = mock.Mock()
+                if isinstance(outcome, Exception):
+                    iface.GetActive.side_effect = outcome
+                else:
+                    iface.GetActive.return_value = outcome
+                dbus = types.ModuleType("dbus")
+                service = types.ModuleType("dbus.service")
+                dbus.__dict__["service"] = service
+                dbus.__dict__["SessionBus"] = mock.Mock(return_value=bus)
+                dbus.__dict__["Boolean"] = bool
+                dbus.__dict__["Interface"] = mock.Mock(return_value=iface)
+                glib_loop = types.ModuleType("dbus.mainloop.glib")
+                glib_loop.__dict__["DBusGMainLoop"] = mock.Mock()
+                repository = types.ModuleType("gi.repository")
+                repository.__dict__["GLib"] = mock.Mock()
+                with (
+                    mock.patch.dict(
+                        sys.modules,
+                        {
+                            "dbus": dbus,
+                            "dbus.service": service,
+                            "dbus.mainloop.glib": glib_loop,
+                            "gi.repository": repository,
+                        },
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "locked or unverifiable"),
+                ):
+                    windows._execute(
+                        {
+                            "op": "atspi_target",
+                            "window_id": _ID,
+                            "timeout": 1,
+                            "script_path": str(Path(directory) / "query.js"),
+                            "require_unlocked": True,
+                        }
+                    )
+                bus.get_object.assert_called_once_with(":1.11", "/ScreenSaver", introspect=False)
+                bus.close.assert_called_once()
+                self.assertFalse((Path(directory) / "query.js").exists())
+
     def test_script_parameters_are_json_escaped(self) -> None:
         text = windows._script("list", '"; evil(); //', ":1.23")
         first_line = text.splitlines()[0]
