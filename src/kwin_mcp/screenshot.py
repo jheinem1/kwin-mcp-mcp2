@@ -83,7 +83,13 @@ def screenshot_metadata(path: Path) -> dict:
     }
 
 
-def _capture_raw(iface: Any, options: dict, *, timeout: float = _CAPTURE_TIMEOUT) -> tuple:
+def _capture_raw(
+    iface: Any,
+    options: dict,
+    *,
+    timeout: float = _CAPTURE_TIMEOUT,
+    output_name: str | None = None,
+) -> tuple:
     """Drain concurrently: a compositor may fill the pipe before replying on D-Bus.
 
     The reader owns its descriptor and always closes it. Both D-Bus and pipe
@@ -123,7 +129,14 @@ def _capture_raw(iface: Any, options: dict, *, timeout: float = _CAPTURE_TIMEOUT
         os.close(write_fd)
         raise
     try:
-        results = iface.CaptureActiveScreen(options, dbus.types.UnixFd(write_fd), timeout=timeout)
+        if output_name is None:
+            results = iface.CaptureActiveScreen(
+                options, dbus.types.UnixFd(write_fd), timeout=timeout
+            )
+        else:
+            results = iface.CaptureScreen(
+                output_name, options, dbus.types.UnixFd(write_fd), timeout=timeout
+            )
     finally:
         os.close(write_fd)
         reader.join(max(0.0, deadline - time.monotonic()) + 0.1)
@@ -401,3 +414,31 @@ def _capture_via_spectacle(
     if not output_path.exists() or output_path.stat().st_size == 0:
         msg = "spectacle produced no output"
         raise RuntimeError(msg)
+
+
+def capture_output_dbus(
+    dbus_address: str, output_name: str, output_path: Path, *, include_cursor: bool = False
+) -> Path:
+    """Capture exactly one named output; never fall back to a different scope."""
+    if not output_name:
+        raise ValueError("An exact output name is required")
+    require_active_compositing(dbus_address)
+    bus = dbus.bus.BusConnection(dbus_address)
+    try:
+        obj = bus.get_object("org.kde.KWin", "/org/kde/KWin/ScreenShot2")
+        iface = dbus.Interface(obj, "org.kde.KWin.ScreenShot2")
+        data, result = _capture_raw(
+            iface,
+            {
+                "include-cursor": dbus.Boolean(include_cursor),
+                "native-resolution": dbus.Boolean(True),
+            },
+            output_name=output_name,
+        )
+        if result.get("screen") != output_name:
+            raise RuntimeError("KWin did not confirm the requested screenshot output")
+        image = _decode_capture(data, result)
+        image.save(output_path, "PNG")
+        return output_path
+    finally:
+        bus.close()

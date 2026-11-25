@@ -65,6 +65,9 @@ class ScreenshotTests(unittest.TestCase):
             calls = [
                 lambda: screenshot.capture_screenshot_to_file("private", output_dir=output),
                 lambda: screenshot.capture_screenshot_dbus("private", output / "direct.png"),
+                lambda: screenshot.capture_output_dbus(
+                    "private", "Virtual-0", output / "named.png"
+                ),
                 lambda: screenshot.capture_frame_burst("private", output, [0]),
             ]
             for call in calls:
@@ -94,6 +97,34 @@ class ScreenshotTests(unittest.TestCase):
         iface = types.SimpleNamespace(CaptureActiveScreen=capture)
         actual, _ = screenshot._capture_raw(iface, {}, timeout=2)
         self.assertEqual(actual, data)
+
+    def test_named_output_calls_exact_capture_method(self) -> None:
+        def capture(name: str, options: dict, fd: int, *, timeout: float) -> dict:
+            self.assertEqual(name, "DP-1")
+            os.write(fd, bytes(4))
+            return {"width": 1, "height": 1, "stride": 4}
+
+        iface = mock.Mock()
+        iface.CaptureScreen.side_effect = capture
+        data, _ = screenshot._capture_raw(iface, {}, output_name="DP-1")
+        self.assertEqual(data, bytes(4))
+        iface.CaptureActiveScreen.assert_not_called()
+
+    def test_named_output_refuses_a_different_reported_output(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(screenshot, "require_active_compositing"),
+            mock.patch.object(screenshot.dbus.bus, "BusConnection", create=True),
+            mock.patch.object(screenshot.dbus, "Interface", create=True),
+            mock.patch.object(screenshot.dbus, "Boolean", side_effect=bool, create=True),
+            mock.patch.object(
+                screenshot, "_capture_raw", return_value=(b"data", {"screen": "DP-2"})
+            ),
+        ):
+            output = Path(directory) / "named.png"
+            with self.assertRaisesRegex(RuntimeError, "did not confirm the requested"):
+                screenshot.capture_output_dbus("private", "DP-1", output)
+            self.assertFalse(output.exists())
 
     def test_dbus_failure_closes_both_descriptors(self) -> None:
         pipe = os.pipe()

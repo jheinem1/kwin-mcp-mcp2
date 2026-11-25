@@ -805,6 +805,18 @@ def file_manager_show(paths: list[str], action: str = "show_items") -> str:
     return _engine.file_manager_show(paths, action)
 
 
+@mcp.tool(description="Capture one named output with layout-checked coordinate metadata.")
+def screenshot_output(output_name: str, include_cursor: bool = False) -> str:
+    """Uses authorized ScreenShot2 capture; never falls back to a different output scope."""
+    return _engine.screenshot_output(output_name, include_cursor)
+
+
+@mcp.tool(description="Map a recent named-output screenshot pixel to global logical coordinates.")
+def map_screenshot_point(capture_id: str, x: float, y: float) -> str:
+    """Checks output geometry again and returns a point without clicking it."""
+    return _engine.map_screenshot_point(capture_id, x, y)
+
+
 # ── D-Bus tools ──────────────────────────────────────────────────────────
 
 
