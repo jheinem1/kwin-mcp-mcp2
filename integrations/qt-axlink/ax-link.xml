@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="jamesos_ax_link_v1">
+  <interface name="jamesos_ax_link_manager_v1" version="1">
+    <description summary="publish a per-surface accessibility root">
+      Publishing conveys no accessibility or input permission. A surface
+      argument must belong to the requesting Wayland connection. The root
+      identifier is scoped to that publisher's process and accessibility bus.
+    </description>
+    <request name="destroy" type="destructor"/>
+    <request name="set_root">
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="root_id" type="uint" summary="nonzero AT-SPI numeric object ID"/>
+    </request>
+    <event name="root_set">
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="root_id" type="uint"/>
+    </event>
+    <request name="clear_root">
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+  </interface>
+</protocol>

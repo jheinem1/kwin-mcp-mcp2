@@ -24,7 +24,7 @@ _PATH = "/org/kwin_mcp/Result"
 
 
 def _validate(op: str, window_id: str, timeout: float) -> None:
-    if op not in {"list", "activate", "geometry", "atspi_target"}:
+    if op not in {"list", "activate", "geometry", "atspi_target", "atspi_explicit_target"}:
         raise ValueError("Unknown KWin window operation")
     if isinstance(timeout, bool) or not math.isfinite(timeout) or not 0 < timeout <= 30:
         raise ValueError("timeout must be finite and between 0 and 30 seconds")
@@ -69,6 +69,27 @@ def _script(op: str, window_id: str, destination: str) -> str:
                 throw new Error("Exact window ID not found; refresh window list");
             }
             var w = matches[0];
+            if (request.op === "atspi_explicit_target") {
+                const pid = Number(w.pid), wid = id(w);
+                if (!Number.isInteger(pid) || pid <= 0 || w.deleted || w.popupWindow) {
+                    throw new Error("Window lacks supported live process identity");
+                }
+                return callDBus("org.kde.KWin.AxLinkTest", "/org/kde/KWin/AxLinkTest",
+                    "org.kde.KWin.AxLinkTest", "LookupInternal", wid, function(binding) {
+                        const root = binding ? Number(binding.root) : 0;
+                        const generation = binding ? String(binding.generation || "") : "";
+                        const ok = !!binding && Number(binding.pid) === pid
+                            && binding.window_id === wid
+                            && Number.isInteger(root) && root > 0 && root < 4294967296
+                            && /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(generation);
+                        const result = ok
+                            ? {ok:true,result:{window_id:wid,pid:pid,wayland_ax_root:root,
+                                wayland_ax_generation:generation}}
+                            : {ok:true,result:{window_id:wid,pid:pid,wayland_ax_root:null}};
+                        callDBus(request.destination, "/org/kwin_mcp/Result",
+                            "org.kwin_mcp.Result", "Complete", JSON.stringify(result));
+                    });
+            }
             if (request.op === "atspi_target") {
                 var pid = Number(w.pid);
                 var title = String(w.caption);
@@ -177,7 +198,10 @@ def _execute(request: dict) -> dict:
     loop = GLib.MainLoop()
     response: list[dict] = []
     owner = bus.get_name_owner("org.kde.KWin")
-    if request["op"] == "atspi_target" and request.get("require_unlocked") is True:
+    if (
+        request["op"] in {"atspi_target", "atspi_explicit_target"}
+        and request.get("require_unlocked") is True
+    ):
         try:
             locker = bus.get_name_owner("org.freedesktop.ScreenSaver")
             proxy = bus.get_object(locker, "/ScreenSaver", introspect=False)

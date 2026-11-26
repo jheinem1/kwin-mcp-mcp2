@@ -554,7 +554,63 @@ def _window_root_size(window: Atspi.Accessible) -> tuple[int, int] | None:
     return int(extent.width), int(extent.height)
 
 
+def _resolve_registered_root(target: dict[str, Any]) -> Atspi.Accessible | None:
+    """Find an exact top-level Qt provider ref, independently checking its bus owner."""
+    import dbus
+
+    pid, root_id = target.get("pid"), target.get("wayland_ax_root")
+    if type(pid) is not int or pid <= 0 or type(root_id) is not int or not 1 <= root_id < 2**32:
+        return None
+    path = f"/org/a11y/atspi/accessible/{root_id}"
+    session_bus = dbus.SessionBus(private=True)
+    a11y_bus = None
+    try:
+        get_address = dbus.Interface(
+            session_bus.get_object("org.a11y.Bus", "/org/a11y/bus", introspect=False),
+            "org.a11y.Bus",
+        ).GetAddress
+        a11y_bus = dbus.bus.BusConnection(str(get_address(timeout=1.0)))
+        bus_daemon = dbus.Interface(
+            a11y_bus.get_object("org.freedesktop.DBus", "/org/freedesktop/DBus", introspect=False),
+            "org.freedesktop.DBus",
+        )
+        desktop = Atspi.get_desktop(0)
+        if desktop is None or not 0 <= desktop.get_child_count() <= MAX_APPLICATIONS:
+            return None
+        found = []
+        for i in range(desktop.get_child_count()):
+            app = desktop.get_child_at_index(i)
+            if app is None:
+                return None
+            if app.get_process_id() != pid:
+                continue
+            if not 0 <= app.get_child_count() <= MAX_TOP_LEVELS:
+                return None
+            for j in range(app.get_child_count()):
+                candidate = app.get_child_at_index(j)
+                if candidate is None:
+                    return None
+                if candidate.path != path or candidate.get_process_id() != pid:
+                    continue
+                owner = candidate.app.bus_name
+                if not isinstance(owner, str) or not owner.startswith(":"):
+                    return None
+                if int(bus_daemon.GetConnectionUnixProcessID(owner, timeout=1.0)) != pid:
+                    return None
+                found.append(candidate)
+        return found[0] if len(found) == 1 else None
+    except (dbus.DBusException, AttributeError, TypeError, ValueError):
+        return None
+    finally:
+        if a11y_bus is not None:
+            a11y_bus.close()
+        session_bus.close()
+
+
 def _resolve_exact_window(target: dict[str, Any]) -> tuple[Atspi.Accessible, str] | None:
+    if "wayland_ax_root" in target:
+        registered = _resolve_registered_root(target)
+        return (registered, "compositor_registered_qt_root") if registered is not None else None
     pid, title = target.get("pid"), target.get("caption")
     if type(pid) is not int or pid <= 0 or not isinstance(title, str) or not 0 < len(title) <= 2048:
         return None

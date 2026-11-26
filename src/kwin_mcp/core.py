@@ -415,6 +415,7 @@ class AutomationEngine:
         include_labels: bool = False,
     ) -> str:
         """Get a bounded, read-only AT-SPI snapshot of one exact KWin window."""
+        from kwin_mcp.ax_link import explicit_test_runtime_requested, root_from_binding
         from kwin_mcp.windows import run_window_operation
 
         if type(max_depth) is not int or not 0 <= max_depth <= 12:
@@ -434,10 +435,23 @@ class AutomationEngine:
         if self._session is not session:
             raise RuntimeError("Selected session changed")
 
+        exact_link = explicit_test_runtime_requested(env)
+
         def compositor_target() -> dict:
-            return run_window_operation(
-                "atspi_target", window_id=window_id, env=env, require_unlocked=live
-            )
+            op = "atspi_explicit_target" if exact_link else "atspi_target"
+            target = run_window_operation(op, window_id=window_id, env=env, require_unlocked=live)
+            if exact_link:
+                pid = target.get("pid")
+                verified = {
+                    "pid": pid,
+                    "root": target.get("wayland_ax_root"),
+                    "window_id": target.get("window_id"),
+                }
+                if type(pid) is not int or root_from_binding(
+                    verified, window_id=window_id, pid=pid
+                ) is None:
+                    raise RuntimeError("Explicit accessibility root is unavailable")
+            return target
 
         try:
             target = compositor_target()
