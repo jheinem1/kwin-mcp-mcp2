@@ -620,6 +620,50 @@ class AutomationEngine:
             raise RuntimeError("No session info available")
         return json.dumps(show_local_paths(info.dbus_address, paths, action=action))
 
+    def window_run_steps(self, window_id: str, steps: list[dict[str, object]]) -> str:
+        """Run a bounded list of verified semantic steps on one exact window."""
+        from kwin_mcp.window_steps import run_window_steps
+
+        session = self._get_session()
+
+        def scoped_reply(reply: str) -> dict:
+            _heading, separator, payload = reply.partition("\n")
+            if not separator:
+                raise ValueError("Missing scoped reply")
+            value = json.loads(payload)
+            if not isinstance(value, dict):
+                raise ValueError("Invalid scoped reply")
+            return value
+
+        def snapshot(wid: str) -> dict:
+            if self._session is not session:
+                raise RuntimeError("Selected session changed")
+            reply = self.window_accessibility(
+                wid, max_depth=8, max_nodes=96, include_action_handles=True
+            )
+            return scoped_reply(reply)
+
+        def action(wid: str, handle: str, op: str, **kwargs: object) -> dict:
+            if self._session is not session:
+                return {"status": "refused", "dispatched": False, "verified": False}
+            text = kwargs.get("text")
+            verify_handle = kwargs.get("verify_handle")
+            verify_state = kwargs.get("verify_state")
+            verify_present = kwargs.get("verify_present")
+            reply = self.window_semantic_action(
+                wid,
+                handle,
+                op,
+                text=text if isinstance(text, str) else None,
+                verify_handle=verify_handle if isinstance(verify_handle, str) else None,
+                verify_state=verify_state if isinstance(verify_state, str) else None,
+                verify_present=verify_present if type(verify_present) is bool else None,
+            )
+            return scoped_reply(reply)
+
+        result = run_window_steps(window_id, steps, snapshot=snapshot, action=action)
+        return _untrusted_text("Scoped window steps", json.dumps(result))
+
     def screenshot_output(self, output_name: str, include_cursor: bool = False) -> str:
         """Capture a named output and retain a short-lived, layout-checked mapping."""
         from kwin_mcp.windows import run_window_operation

@@ -835,6 +835,12 @@ def file_manager_show(paths: list[str], action: str = "show_items") -> str:
     return _engine.file_manager_show(paths, action)
 
 
+@mcp.tool(description="Run a bounded sequence of verified semantic steps in one exact window.")
+def window_run_steps(window_id: str, steps: list[dict[str, object]]) -> str:
+    """Accept only typed actions and assertions; stop on ambiguity without retrying."""
+    return _engine.window_run_steps(window_id, steps)
+
+
 @mcp.tool(description="Capture one named output with layout-checked coordinate metadata.")
 def screenshot_output(output_name: str, include_cursor: bool = False) -> str:
     """Uses authorized ScreenShot2 capture; never falls back to a different output scope."""
