@@ -25,7 +25,7 @@ from kwin_mcp.screenshot import (
     capture_screenshot_to_file,
     screenshot_metadata,
 )
-from kwin_mcp.session import LiveSession, Session, SessionConfig
+from kwin_mcp.session import LiveSession, Session, SessionConfig, SessionType
 
 # Install hints for external binaries
 _INSTALL_HINTS: dict[str, str] = {
@@ -118,7 +118,14 @@ class AutomationEngine:
         env.pop("DISPLAY", None)
         return env
 
-    def _run_atspi(self, op: str, *, retry: bool = True, **kwargs: object) -> dict:
+    def _run_atspi(
+        self,
+        op: str,
+        *,
+        retry: bool = True,
+        session_env: dict[str, str] | None = None,
+        **kwargs: object,
+    ) -> dict:
         """Run an AT-SPI2 query in a subprocess with the isolated session's D-Bus address.
 
         The gi.repository.Atspi library caches the D-Bus connection process-wide,
@@ -127,7 +134,10 @@ class AutomationEngine:
 
         Retries once on failure to handle transient AT-SPI2 bus instability.
         """
-        env = self._session_env()
+        env = self._session_env() if session_env is None else session_env
+        if op == "window_accessibility":
+            # Always resolve the accessibility bus through this selected session.
+            env = {k: v for k, v in env.items() if k != "AT_SPI_BUS_ADDRESS"}
         # One wall-clock budget, including retry, not 30 seconds per attempt.
         timeout_ms = kwargs.get("timeout_ms", 5000)
         if not isinstance(timeout_ms, (int, float)) or not 0 <= timeout_ms <= 59000:
@@ -396,6 +406,81 @@ class AutomationEngine:
 
         result = run_window_operation("activate", window_id=window_id, env=self._session_env())
         return _untrusted_text("KWin activation", json.dumps(result))
+
+    def window_accessibility(
+        self,
+        window_id: str,
+        max_depth: int = 6,
+        max_nodes: int = 100,
+        include_labels: bool = False,
+    ) -> str:
+        """Get a bounded, read-only AT-SPI snapshot of one exact KWin window."""
+        from kwin_mcp.ax_link import explicit_test_runtime_requested, root_from_binding
+        from kwin_mcp.windows import run_window_operation
+
+        if type(max_depth) is not int or not 0 <= max_depth <= 12:
+            raise ValueError("max_depth must be an integer from 0 to 12")
+        if type(max_nodes) is not int or not 1 <= max_nodes <= 200:
+            raise ValueError("max_nodes must be an integer from 1 to 200")
+        if type(include_labels) is not bool:
+            raise ValueError("include_labels must be boolean")
+        session = self._get_session()
+        info = session.info
+        if info is None:
+            raise RuntimeError("No session info available")
+        if info.session_type not in (SessionType.LIVE, SessionType.VIRTUAL):
+            raise RuntimeError("Unrecognized session type")
+        live = info.session_type is SessionType.LIVE
+        env = self._session_env()
+        if self._session is not session:
+            raise RuntimeError("Selected session changed")
+
+        exact_link = explicit_test_runtime_requested(env)
+
+        def compositor_target() -> dict:
+            op = "atspi_explicit_target" if exact_link else "atspi_target"
+            target = run_window_operation(op, window_id=window_id, env=env, require_unlocked=live)
+            if exact_link:
+                pid = target.get("pid")
+                verified = {
+                    "pid": pid,
+                    "root": target.get("wayland_ax_root"),
+                    "window_id": target.get("window_id"),
+                }
+                if (
+                    type(pid) is not int
+                    or root_from_binding(verified, window_id=window_id, pid=pid) is None
+                ):
+                    raise RuntimeError("Explicit accessibility root is unavailable")
+            return target
+
+        try:
+            target = compositor_target()
+            response = self._run_atspi(
+                "window_accessibility",
+                session_env=env,
+                target=target,
+                max_depth=max_depth,
+                max_nodes=max_nodes,
+                include_labels=include_labels,
+            )
+            if not response["ok"]:
+                raise RuntimeError("AT-SPI snapshot not available")
+            result = json.loads(response["result"])
+            if not isinstance(result, dict) or result.get("status") not in ("ok", "unsupported"):
+                raise RuntimeError("Invalid accessibility snapshot")
+            if result["status"] == "ok" and (
+                self._session is not session
+                or compositor_target() != target
+                or self._session is not session
+            ):
+                result = {"status": "unsupported", "reason": "KWin window identity changed"}
+        except (RuntimeError, ValueError):
+            result = {
+                "status": "unsupported",
+                "reason": "Window, accessibility bridge, or unlocked session could not be verified",
+            }
+        return _untrusted_text("Exact window accessibility", json.dumps(result))
 
     def file_manager_show(self, paths: list[str], action: str = "show_items") -> str:
         """Show local items/folders using the session's default FileManager1 provider."""

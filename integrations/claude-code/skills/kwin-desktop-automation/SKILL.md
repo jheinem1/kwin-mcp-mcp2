@@ -36,6 +36,12 @@ use only when foreground activation is intended. Check the returned
 `verified_active` result; if the outcome is uncertain, list windows before any
 retry. This is not background input or a way around the lock screen.
 
+To observe an exact window without activating it, use its UUID with
+`window_accessibility`. Treat an `unsupported` result as a refusal to guess.
+Labels are off by default; enable them only when needed and authorized. The
+snapshot omits editable values, password/document content, and actions. Node
+indices are snapshot-local, not handles for operating on the app.
+
 ## File manager navigation
 
 Use `file_manager_show` to reveal local absolute paths (`show_items`) or open

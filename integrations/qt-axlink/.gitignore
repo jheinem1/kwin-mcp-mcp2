@@ -1,0 +1,5 @@
+*.moc
+ax-link-client.h
+ax-link-server.h
+ax-link-generated.c
+__pycache__/

@@ -24,7 +24,7 @@ _PATH = "/org/kwin_mcp/Result"
 
 
 def _validate(op: str, window_id: str, timeout: float) -> None:
-    if op not in {"list", "activate", "geometry"}:
+    if op not in {"list", "activate", "geometry", "atspi_target", "atspi_explicit_target"}:
         raise ValueError("Unknown KWin window operation")
     if isinstance(timeout, bool) or not math.isfinite(timeout) or not 0 < timeout <= 30:
         raise ValueError("timeout must be finite and between 0 and 30 seconds")
@@ -69,6 +69,50 @@ def _script(op: str, window_id: str, destination: str) -> str:
                 throw new Error("Exact window ID not found; refresh window list");
             }
             var w = matches[0];
+            if (request.op === "atspi_explicit_target") {
+                const pid = Number(w.pid), wid = id(w);
+                if (!Number.isInteger(pid) || pid <= 0 || w.deleted || w.popupWindow) {
+                    throw new Error("Window lacks supported live process identity");
+                }
+                return callDBus("org.kde.KWin.AxLinkTest", "/org/kde/KWin/AxLinkTest",
+                    "org.kde.KWin.AxLinkTest", "LookupInternal", wid, function(binding) {
+                        const root = binding ? Number(binding.root) : 0;
+                        const generation = binding ? String(binding.generation || "") : "";
+                        const ok = !!binding && Number(binding.pid) === pid
+                            && binding.window_id === wid
+                            && Number.isInteger(root) && root > 0 && root < 4294967296
+                            && /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(generation);
+                        const result = ok
+                            ? {ok:true,result:{window_id:wid,pid:pid,wayland_ax_root:root,
+                                wayland_ax_generation:generation}}
+                            : {ok:true,result:{window_id:wid,pid:pid,wayland_ax_root:null}};
+                        callDBus(request.destination, "/org/kwin_mcp/Result",
+                            "org.kwin_mcp.Result", "Complete", JSON.stringify(result));
+                    });
+            }
+            if (request.op === "atspi_target") {
+                var pid = Number(w.pid);
+                var title = String(w.caption);
+                if (!Number.isInteger(pid) || pid <= 0 || w.caption === undefined ||
+                        !title || title.length > 2048 || w.deleted || w.popupWindow) {
+                    throw new Error("Window lacks supported process/title identity");
+                }
+                var peers = windows.filter(function (peer) {
+                    return Number(peer.pid) === pid && String(peer.caption) === title;
+                });
+                if (peers.length > 32 || peers.some(function (peer) {
+                    return peer.deleted || peer.popupWindow;
+                })) {
+                    throw new Error("Same-process, same-title KWin cohort is unsupported");
+                }
+                return callDBus(request.destination, "/org/kwin_mcp/Result",
+                    "org.kwin_mcp.Result", "Complete", JSON.stringify({ok:true, result:{
+                        window_id:id(w), pid:pid, caption:title, peers:peers.map(function (peer) {
+                            return {window_id:id(peer), client_geometry:
+                                peer.clientGeometry ? rect(peer.clientGeometry) : null};
+                        }).sort(function (a,b) { return a.window_id.localeCompare(b.window_id); })
+                    }}));
+            }
             if (request.op === "activate") {
                 workspace.activeWindow = w;
                 data.action_status = "dispatched";
@@ -86,7 +130,12 @@ def _script(op: str, window_id: str, destination: str) -> str:
 
 
 def run_window_operation(
-    op: str, *, window_id: str = "", env: dict[str, str], timeout: float = 5.0
+    op: str,
+    *,
+    window_id: str = "",
+    env: dict[str, str],
+    timeout: float = 5.0,
+    require_unlocked: bool = False,
 ) -> dict:
     """Return compositor state; never retry an activation with uncertain outcome.
 
@@ -101,6 +150,7 @@ def run_window_operation(
             "op": op,
             "window_id": window_id,
             "timeout": timeout,
+            "require_unlocked": require_unlocked,
             "script_path": str(Path(directory) / "query.js"),
         }
         try:
@@ -148,6 +198,21 @@ def _execute(request: dict) -> dict:
     loop = GLib.MainLoop()
     response: list[dict] = []
     owner = bus.get_name_owner("org.kde.KWin")
+    if (
+        request["op"] in {"atspi_target", "atspi_explicit_target"}
+        and request.get("require_unlocked") is True
+    ):
+        try:
+            locker = bus.get_name_owner("org.freedesktop.ScreenSaver")
+            proxy = bus.get_object(locker, "/ScreenSaver", introspect=False)
+            active = dbus.Interface(proxy, "org.freedesktop.ScreenSaver").GetActive(
+                timeout=min(1.0, _remaining(deadline))
+            )
+            if not isinstance(active, dbus.Boolean) or bool(active):
+                raise RuntimeError("Session is locked or lock status is unavailable")
+        except Exception as exc:
+            bus.close()
+            raise RuntimeError("Refusing to inspect a locked or unverifiable live session") from exc
 
     class Receiver(dbus.service.Object):
         @dbus.service.method(

@@ -799,6 +799,17 @@ def activate_window(window_id: str) -> str:
     return _engine.activate_window(window_id)
 
 
+@mcp.tool(description="Read a bounded AT-SPI subtree for one exact KWin window UUID.")
+def window_accessibility(
+    window_id: str,
+    max_depth: int = 6,
+    max_nodes: int = 100,
+    include_labels: bool = False,
+) -> str:
+    """Read only, without focus or input. Labels are opt-in; no text values are read."""
+    return _engine.window_accessibility(window_id, max_depth, max_nodes, include_labels)
+
+
 @mcp.tool(description="Show local items or folders through the default desktop file manager.")
 def file_manager_show(paths: list[str], action: str = "show_items") -> str:
     """Dispatch FileManager1 navigation; acceptance does not verify visible selection."""
