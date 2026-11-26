@@ -14,7 +14,8 @@ b=pathlib.Path(os.environ["AX_WORK"])
 s=pathlib.Path(os.environ["AX_STAGE"])
 mode=sys.argv[1]
 test_lock = mode in {'lock','semantic-lock'}
-semantic = mode in {'semantic','semantic-lock'}
+scoped = mode == 'scoped'
+semantic = mode in {'semantic','semantic-lock'} or scoped
 no_publisher = mode == 'no-publisher'
 if semantic: mode = 'fixture'
 elif test_lock or no_publisher: mode = 'kate'
@@ -260,6 +261,10 @@ callDBus(request.destination,"/org/kwin_mcp/Result","org.kwin_mcp.Result","Compl
         target_id=next(x for x in ids if x!=active)
         twin_id=next(x for x in ids if x!=target_id)
         target=snap(target_id)
+        if scoped:
+            from scoped_fixture import verify_scoped_fixture
+            verify_scoped_fixture(cli, snap, find, observer, state, target_id, twin_id, target)
+            sys.exit(0)
         button=(find(target,"push button") or find(target,"button"))
         check=find(target,"check box")
         secret=find(target,"password text")
