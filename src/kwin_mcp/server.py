@@ -843,6 +843,7 @@ def window_run_steps(window_id: str, steps: list[dict[str, object]]) -> str:
     """Accept only typed actions and assertions; stop on ambiguity without retrying."""
     return _engine.window_run_steps(window_id, steps)
 
+
 @mcp.tool(description="Observe one exact window as pixels when accessibility is insufficient.")
 def screenshot_window(window_id: str) -> list[TextContent | ImageContent]:
     """Read only, no focus change, pointer, coordinate mapping, or broader capture."""
