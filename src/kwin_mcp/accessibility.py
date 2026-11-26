@@ -557,6 +557,7 @@ def _window_root_size(window: Atspi.Accessible) -> tuple[int, int] | None:
 def _resolve_registered_root(target: dict[str, Any]) -> Atspi.Accessible | None:
     """Find an exact top-level Qt provider ref, independently checking its bus owner."""
     import dbus
+    from dbus.bus import BusConnection
 
     pid, root_id = target.get("pid"), target.get("wayland_ax_root")
     if type(pid) is not int or pid <= 0 or type(root_id) is not int or not 1 <= root_id < 2**32:
@@ -569,7 +570,7 @@ def _resolve_registered_root(target: dict[str, Any]) -> Atspi.Accessible | None:
             session_bus.get_object("org.a11y.Bus", "/org/a11y/bus", introspect=False),
             "org.a11y.Bus",
         ).GetAddress
-        a11y_bus = dbus.bus.BusConnection(str(get_address(timeout=1.0)))
+        a11y_bus = BusConnection(str(get_address(timeout=1.0)))
         bus_daemon = dbus.Interface(
             a11y_bus.get_object("org.freedesktop.DBus", "/org/freedesktop/DBus", introspect=False),
             "org.freedesktop.DBus",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, cast
 
 MAX_PEERS = 32
 MAX_APPLICATIONS = 256
@@ -28,8 +28,9 @@ def _size(geometry: object) -> tuple[int, int] | None:
     """Accept only exact, positive integer logical dimensions."""
     if not isinstance(geometry, dict):
         return None
-    width = _logical_dimension(geometry.get("width"))
-    height = _logical_dimension(geometry.get("height"))
+    rect = cast("dict[str, object]", geometry)
+    width = _logical_dimension(rect.get("width"))
+    height = _logical_dimension(rect.get("height"))
     return (width, height) if width is not None and height is not None else None
 
 
