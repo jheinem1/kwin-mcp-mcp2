@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -48,9 +48,10 @@ def parse_steps(values: object) -> list[Step]:
     if not isinstance(values, list) or not 1 <= len(values) <= MAX_STEPS:
         raise ValueError(f"Expected 1 to {MAX_STEPS} scoped window steps")
     steps: list[Step] = []
-    for data in values:
-        if not isinstance(data, dict):
+    for raw in values:
+        if not isinstance(raw, dict):
             raise ValueError("Each step must be an object")
+        data = cast("dict[str, Any]", raw)
         op = data.get("op")
         key = _key(data.get("key"))
         if op == "set_text" and set(data) == {"op", "key", "text"}:
@@ -79,22 +80,25 @@ def parse_steps(values: object) -> list[Step]:
 
 
 def _snapshot_nodes(snapshot: object, window_id: str) -> dict[str, dict]:
+    if not isinstance(snapshot, dict):
+        raise ValueError("No exact accessibility snapshot for the intended window")
+    payload = cast("dict[str, Any]", snapshot)
     if (
-        not isinstance(snapshot, dict)
-        or snapshot.get("status") != "ok"
-        or snapshot.get("match") != _EXACT_MATCH
-        or snapshot.get("window_id") != window_id
-        or not isinstance(snapshot.get("tree"), dict)
+        payload.get("status") != "ok"
+        or payload.get("match") != _EXACT_MATCH
+        or payload.get("window_id") != window_id
+        or not isinstance(payload.get("tree"), dict)
     ):
         raise ValueError("No exact accessibility snapshot for the intended window")
-    stack = [snapshot["tree"]]
+    stack: list[object] = [payload["tree"]]
     seen: set[int] = set()
     matches: dict[str, dict] = {}
     while stack:
-        node = stack.pop()
-        if not isinstance(node, dict) or id(node) in seen or len(seen) >= 200:
+        raw = stack.pop()
+        if not isinstance(raw, dict) or id(raw) in seen or len(seen) >= 200:
             raise ValueError("Unverifiable accessibility snapshot shape")
-        seen.add(id(node))
+        seen.add(id(raw))
+        node = cast("dict[str, Any]", raw)
         children = node.get("children")
         if not isinstance(children, list) or len(children) > 200:
             raise ValueError("Unverifiable accessibility snapshot children")
