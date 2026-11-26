@@ -9,10 +9,13 @@ from virtual (isolated) to live (real desktop).
 
 from __future__ import annotations
 
+import base64
+import json
 import sys
 from typing import Annotated
 
 from mcp.server import MCPServer
+from mcp.types import ImageContent, TextContent
 from pydantic import Field
 
 from kwin_mcp.core import AutomationEngine
@@ -839,6 +842,22 @@ def file_manager_show(paths: list[str], action: str = "show_items") -> str:
 def window_run_steps(window_id: str, steps: list[dict[str, object]]) -> str:
     """Accept only typed actions and assertions; stop on ambiguity without retrying."""
     return _engine.window_run_steps(window_id, steps)
+
+
+@mcp.tool(description="Observe one exact window as pixels when accessibility is insufficient.")
+def screenshot_window(window_id: str) -> list[TextContent | ImageContent]:
+    """Read only, no focus change, pointer, coordinate mapping, or broader capture."""
+    metadata, png = _engine.screenshot_window(window_id)
+    content: list[TextContent | ImageContent] = [
+        TextContent(type="text", text=json.dumps(metadata))
+    ]
+    if png is not None:
+        content.append(
+            ImageContent(
+                type="image", data=base64.b64encode(png).decode("ascii"), mime_type="image/png"
+            )
+        )
+    return content
 
 
 @mcp.tool(description="Capture one named output with layout-checked coordinate metadata.")

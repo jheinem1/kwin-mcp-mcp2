@@ -245,11 +245,25 @@ kwin-mcp-cli --default-live-session
 | `window_accessibility` | `window_id` `str`, `max_depth?` `int`, `max_nodes?` `int`, `include_labels?` `bool`, `include_action_handles?` `bool` | Inspect one verified window through AT-SPI without focusing it. Bounded metadata; labels opt-in, no text values, ambiguous mappings refused. |
 | `window_semantic_action` | `window_id`, `action_handle`, `action`, optional verification or entry arguments | Verify one exact staged button press or fill one empty eligible edit field. No live support. |
 
+| `screenshot_window` | `window_id` `str` | Observe the exact compositor window as an inline PNG, without activation or input. |
+
 A successful `window_accessibility` returns an exact PID/title match or, for
 same-title GTK 3 windows, a complete unique match of exact client sizes. Equal
 sizes, other duplicate-title toolkits, inaccessible applications and locked or
 unverifiable live sessions are unsupported. Snapshot indices are for reading,
-not persistent element handles. There is no screenshot or input fallback.
+not persistent element handles. Accessibility never falls back automatically.
+
+When accessibility is unavailable or insufficient, explicitly call
+`screenshot_window` with the same current UUID from `kwin_windows`. It requests a
+new image from the compositor for that window alone (including its frame, without
+cursor or shadow) and returns window-local pixels, never input coordinates. An
+unfocused or covered window can be captured without raising it; an application may
+still have stopped updating its content. Minimized, off-desktop, off-activity,
+off-screen, protected, and closed windows are not supported. Locked or unverifiable
+live sessions, missing capture authorization, and a change in target state during
+capture return `unsupported` without an image. The tool does not try an active-window,
+area, or full-display screenshot instead. PNGs are returned inline rather than saved
+to the session screenshot directory.
 
 The private, compositor-registered Qt staging runtime can opt into short-lived
 semantic handles. See [action contract and limits](docs/EXACT_SEMANTIC_ACTIONS.md).

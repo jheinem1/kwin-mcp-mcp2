@@ -24,7 +24,14 @@ _PATH = "/org/kwin_mcp/Result"
 
 
 def _validate(op: str, window_id: str, timeout: float) -> None:
-    if op not in {"list", "activate", "geometry", "atspi_target", "atspi_explicit_target"}:
+    if op not in {
+        "list",
+        "activate",
+        "geometry",
+        "atspi_target",
+        "atspi_explicit_target",
+        "capture_target",
+    }:
         raise ValueError("Unknown KWin window operation")
     if isinstance(timeout, bool) or not math.isfinite(timeout) or not 0 < timeout <= 30:
         raise ValueError("timeout must be finite and between 0 and 30 seconds")
@@ -69,6 +76,32 @@ def _script(op: str, window_id: str, destination: str) -> str:
                 throw new Error("Exact window ID not found; refresh window list");
             }
             var w = matches[0];
+            if (request.op === "capture_target") {
+                const g = w.frameGeometry;
+                const pid = Number(w.pid);
+                const desktop = workspace.currentDesktop;
+                const activity = workspace.currentActivity;
+                if (w.normalWindow !== true || w.deleted !== false || w.popupWindow !== false ||
+                        w.minimized !== false || w.hidden !== false || w.opacity <= 0 ||
+                        !Number.isInteger(pid) || pid <= 0 || !w.output ||
+                        !desktop || typeof w.onAllDesktops !== "boolean" ||
+                        !(w.onAllDesktops || w.desktops.indexOf(desktop) >= 0) ||
+                        !(w.activities.length === 0 || w.activities.indexOf(activity) >= 0) ||
+                        !g || ![g.x, g.y, g.width, g.height].every(Number.isFinite) ||
+                        g.width <= 0 || g.height <= 0 || !outputs.some(function (o) {
+                            const r = o.geometry;
+                            return g.x < r.x + r.width && r.x < g.x + g.width &&
+                                   g.y < r.y + r.height && r.y < g.y + g.height;
+                        })) {
+                    throw new Error("Window unavailable for exact capture");
+                }
+                return callDBus(request.destination, "/org/kwin_mcp/Result",
+                    "org.kwin_mcp.Result", "Complete", JSON.stringify({ok:true, result:{
+                        window_id: id(w), pid: pid, frame: rect(g), output: String(w.output.name),
+                        scale: w.output.devicePixelRatio, desktop: String(desktop.id),
+                        activity: String(activity)
+                    }}));
+            }
             if (request.op === "atspi_explicit_target") {
                 const pid = Number(w.pid), wid = id(w);
                 if (!Number.isInteger(pid) || pid <= 0 || w.deleted || w.popupWindow) {
@@ -199,7 +232,7 @@ def _execute(request: dict) -> dict:
     response: list[dict] = []
     owner = bus.get_name_owner("org.kde.KWin")
     if (
-        request["op"] in {"atspi_target", "atspi_explicit_target"}
+        request["op"] in {"atspi_target", "atspi_explicit_target", "capture_target"}
         and request.get("require_unlocked") is True
     ):
         try:
@@ -253,6 +286,9 @@ def _execute(request: dict) -> dict:
             loop.run()
         if not response:
             raise TimeoutError("KWin callback timed out; activation outcome unknown")
+        if request["op"] == "capture_target" and response[0].get("ok"):
+            # This sender was already verified by the callback receiver.
+            response[0]["result"]["compositor_owner"] = str(owner)
         return response[0]
     finally:
         if timer is not None:

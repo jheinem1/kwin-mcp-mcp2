@@ -25,6 +25,7 @@ from kwin_mcp.screenshot import (
     capture_frame_burst,
     capture_output_dbus,
     capture_screenshot_to_file,
+    capture_window_dbus,
     screenshot_metadata,
 )
 from kwin_mcp.semantic_actions import TTL_SECONDS, SnapshotHandles, report, valid_request
@@ -663,6 +664,62 @@ class AutomationEngine:
 
         result = run_window_steps(window_id, steps, snapshot=snapshot, action=action)
         return _untrusted_text("Scoped window steps", json.dumps(result))
+
+    def screenshot_window(self, window_id: str) -> tuple[dict, bytes | None]:
+        """Observe one exact eligible window; never issue input or infer a transform."""
+        import dbus
+
+        from kwin_mcp.windows import run_window_operation
+
+        target = str(uuid.UUID(window_id.strip("{}")))
+        session = self._get_session()
+        info = session.info
+        if info is None or info.session_type not in (SessionType.LIVE, SessionType.VIRTUAL):
+            raise RuntimeError("No verified KWin session")
+        env = self._session_env()
+
+        def snapshot() -> dict:
+            if self._session is not session:
+                raise RuntimeError("Selected session changed")
+            result = run_window_operation(
+                "capture_target",
+                window_id=target,
+                env=env,
+                timeout=3.0,
+                require_unlocked=info.session_type is SessionType.LIVE,
+            )
+            if result.get("window_id") != target or "cleanup_warning" in result:
+                raise RuntimeError("Could not verify capture target")
+            return result
+
+        try:
+            before = snapshot()
+            size, png = capture_window_dbus(
+                info.dbus_address,
+                target,
+                owner=before["compositor_owner"],
+            )
+            if snapshot() != before or self._session is not session:
+                raise RuntimeError("Capture target changed")
+        except (dbus.DBusException, KeyError, RuntimeError, ValueError, OSError):
+            return (
+                {
+                    "status": "unsupported",
+                    "window_id": target,
+                    "reason": "Window unavailable, changed, or exact capture not authorized",
+                },
+                None,
+            )
+        return (
+            {
+                "status": "ok",
+                "window_id": target,
+                **size,
+                "coordinate_space": "window_image_pixels",
+                "transform_available": False,
+            },
+            png,
+        )
 
     def screenshot_output(self, output_name: str, include_cursor: bool = False) -> str:
         """Capture a named output and retain a short-lived, layout-checked mapping."""
