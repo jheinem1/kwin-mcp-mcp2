@@ -805,9 +805,28 @@ def window_accessibility(
     max_depth: int = 6,
     max_nodes: int = 100,
     include_labels: bool = False,
+    include_action_handles: bool = False,
 ) -> str:
     """Read only, without focus or input. Labels are opt-in; no text values are read."""
-    return _engine.window_accessibility(window_id, max_depth, max_nodes, include_labels)
+    return _engine.window_accessibility(
+        window_id, max_depth, max_nodes, include_labels, include_action_handles
+    )
+
+
+@mcp.tool(description="Press a registered button or fill an empty field in private staging.")
+def window_semantic_action(
+    window_id: str,
+    action_handle: str,
+    action: str,
+    text: str | None = None,
+    verify_handle: str | None = None,
+    verify_state: str | None = None,
+    verify_present: bool | None = None,
+) -> str:
+    """Single-use snapshot handles; stage-only, no physical input or mutation retry."""
+    return _engine.window_semantic_action(
+        window_id, action_handle, action, text, verify_handle, verify_state, verify_present
+    )
 
 
 @mcp.tool(description="Show local items or folders through the default desktop file manager.")

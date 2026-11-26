@@ -13,9 +13,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from kwin_mcp.coordinates import map_point, native_size_matches, output_geometry
 from kwin_mcp.input import InputBackend, MouseButton
@@ -25,6 +27,7 @@ from kwin_mcp.screenshot import (
     capture_screenshot_to_file,
     screenshot_metadata,
 )
+from kwin_mcp.semantic_actions import TTL_SECONDS, SnapshotHandles, report, valid_request
 from kwin_mcp.session import LiveSession, Session, SessionConfig, SessionType
 
 # Install hints for external binaries
@@ -83,6 +86,8 @@ class AutomationEngine:
         self._wl_copy_proc: subprocess.Popen[bytes] | None = None
         self._keep_screenshots: bool = False
         self._captures: dict[str, dict] = {}
+        self._semantic_handles = SnapshotHandles()
+        self._semantic_lock = threading.RLock()
 
     # ── Private helpers ───────────────────────────────────────────────────
 
@@ -135,7 +140,7 @@ class AutomationEngine:
         Retries once on failure to handle transient AT-SPI2 bus instability.
         """
         env = self._session_env() if session_env is None else session_env
-        if op == "window_accessibility":
+        if op in {"window_accessibility", "window_semantic_action"}:
             # Always resolve the accessibility bus through this selected session.
             env = {k: v for k, v in env.items() if k != "AT_SPI_BUS_ADDRESS"}
         # One wall-clock budget, including retry, not 30 seconds per attempt.
@@ -367,6 +372,8 @@ class AutomationEngine:
         else:
             self._session.stop()
         self._session = None
+        with self._semantic_lock:
+            self._semantic_handles.clear()
         self._input = None
         self._keep_screenshots = False
 
@@ -413,6 +420,7 @@ class AutomationEngine:
         max_depth: int = 6,
         max_nodes: int = 100,
         include_labels: bool = False,
+        include_action_handles: bool = False,
     ) -> str:
         """Get a bounded, read-only AT-SPI snapshot of one exact KWin window."""
         from kwin_mcp.ax_link import explicit_test_runtime_requested, root_from_binding
@@ -422,8 +430,8 @@ class AutomationEngine:
             raise ValueError("max_depth must be an integer from 0 to 12")
         if type(max_nodes) is not int or not 1 <= max_nodes <= 200:
             raise ValueError("max_nodes must be an integer from 1 to 200")
-        if type(include_labels) is not bool:
-            raise ValueError("include_labels must be boolean")
+        if type(include_labels) is not bool or type(include_action_handles) is not bool:
+            raise ValueError("Accessibility options must be boolean")
         session = self._get_session()
         info = session.info
         if info is None:
@@ -436,6 +444,7 @@ class AutomationEngine:
             raise RuntimeError("Selected session changed")
 
         exact_link = explicit_test_runtime_requested(env)
+        can_issue = include_action_handles and not live and self._private_semantic_socket(env)
 
         def compositor_target() -> dict:
             op = "atspi_explicit_target" if exact_link else "atspi_target"
@@ -454,6 +463,7 @@ class AutomationEngine:
                     raise RuntimeError("Explicit accessibility root is unavailable")
             return target
 
+        result: dict[str, Any]
         try:
             target = compositor_target()
             response = self._run_atspi(
@@ -463,6 +473,7 @@ class AutomationEngine:
                 max_depth=max_depth,
                 max_nodes=max_nodes,
                 include_labels=include_labels,
+                include_action_handles=can_issue,
             )
             if not response["ok"]:
                 raise RuntimeError("AT-SPI snapshot not available")
@@ -475,12 +486,130 @@ class AutomationEngine:
                 or self._session is not session
             ):
                 result = {"status": "unsupported", "reason": "KWin window identity changed"}
+            if can_issue and result["status"] == "ok":
+                with self._semantic_lock:
+                    if self._session is not session:
+                        raise RuntimeError("Selected session changed")
+                    tree = result.get("tree")
+                    if not isinstance(tree, dict):
+                        raise RuntimeError("Malformed accessibility tree")
+                    if self._semantic_handles.issue(tree, session, target):
+                        result["action_handles_expire_in_seconds"] = TTL_SECONDS
         except (RuntimeError, ValueError):
             result = {
                 "status": "unsupported",
                 "reason": "Window, accessibility bridge, or unlocked session could not be verified",
             }
-        return _untrusted_text("Exact window accessibility", json.dumps(result))
+        encoded = json.dumps(result)
+        if can_issue and len(encoded) > _MAX_MODEL_TEXT - 128:
+            encoded = json.dumps(
+                {
+                    "status": "unsupported",
+                    "reason": "Actionable snapshot exceeds output budget; request lower max_nodes",
+                }
+            )
+        return _untrusted_text("Exact window accessibility", encoded)
+
+    @staticmethod
+    def _private_semantic_socket(env: dict[str, str]) -> bool:
+        from kwin_mcp.ax_link import explicit_test_runtime_requested
+
+        if not explicit_test_runtime_requested(env):
+            return False
+        runtime = Path(env["XDG_RUNTIME_DIR"])
+        socket = (runtime / env.get("WAYLAND_DISPLAY", "")).resolve()
+        return (
+            socket.parent == runtime
+            and (socket.name == "axlink-0" or socket.name.startswith("wayland-"))
+            and socket.is_socket()
+        )
+
+    def window_semantic_action(
+        self,
+        window_id: str,
+        action_handle: str,
+        action: str,
+        text: str | None = None,
+        verify_handle: str | None = None,
+        verify_state: str | None = None,
+        verify_present: bool | None = None,
+    ) -> str:
+        """Dispatch one verified semantic action in the private exact Qt staging runtime."""
+        from kwin_mcp.windows import run_window_operation
+
+        def render(status: str, dispatched: bool | None, reason: str) -> str:
+            return _untrusted_text(
+                "Exact window semantic action", json.dumps(report(status, dispatched, reason))
+            )
+
+        def refused(reason: str) -> str:
+            return render("refused", False, reason)
+
+        if not valid_request(action, text, verify_handle, verify_state, verify_present):
+            return refused("Unsupported or incomplete semantic action")
+        try:
+            win_id = str(uuid.UUID(window_id))
+        except (ValueError, TypeError, AttributeError):
+            return refused("Invalid exact window UUID")
+
+        with self._semantic_lock:
+            try:
+                session = self._get_session()
+                info = session.info
+                env = self._session_env()
+                if (
+                    info is None
+                    or info.session_type is not SessionType.VIRTUAL
+                    or not self._private_semantic_socket(env)
+                    or self._session is not session
+                ):
+                    return refused(
+                        "Only a private compositor-authoritative staging session is supported"
+                    )
+                refs = self._semantic_handles.take(action_handle, verify_handle, session, win_id)
+                if refs is None:
+                    return refused("Expired, used, or mismatched snapshot handles")
+                expected, element, observer = refs
+                if action not in element.get("actions", []):
+                    return refused("Snapshot element does not support the requested action")
+
+                def anchor():
+                    return run_window_operation("atspi_explicit_target", window_id=win_id, env=env)
+
+                if anchor() != expected or self._session is not session:
+                    return refused("Compositor window registration changed")
+            except (RuntimeError, ValueError, OSError):
+                return refused("Compositor, staging session, or window registration unavailable")
+            dispatched = None
+            try:
+                response = self._run_atspi(
+                    "window_semantic_action",
+                    retry=False,
+                    session_env=env,
+                    target=expected,
+                    element_ref=element,
+                    verify_ref=observer,
+                    verify_state=verify_state,
+                    verify_present=verify_present,
+                    action=action,
+                    text=text,
+                )
+                if not response["ok"]:
+                    raise RuntimeError("Worker result unavailable")
+                result = json.loads(response["result"])
+                dispatched = result["dispatched"]
+                if result["status"] == "refused" and dispatched is False:
+                    return refused(result["reason"])
+                if (
+                    result["status"] == "verified"
+                    and dispatched is True
+                    and self._session is session
+                    and anchor() == expected
+                ):
+                    return render("verified", True, "Effect observed in the registered root")
+            except (RuntimeError, ValueError, OSError, KeyError, TypeError):
+                pass
+            return render("unverified", dispatched, "Effect unverified; inspect without retrying")
 
     def file_manager_show(self, paths: list[str], action: str = "show_items") -> str:
         """Show local items/folders using the session's default FileManager1 provider."""
