@@ -40,7 +40,11 @@ To observe an exact window without activating it, use its UUID with
 `window_accessibility`. Treat an `unsupported` result as a refusal to guess.
 Labels are off by default; enable them only when needed and authorized. The
 snapshot omits editable values, password/document content, and actions. Node
-indices are snapshot-local, not handles for operating on the app.
+indices are snapshot-local, not handles for operating on the app. If accessibility
+is unavailable or lacks necessary visual detail, explicitly use
+`screenshot_window(window_id)` with the same UUID. It returns observation-only
+pixels and does not supply input coordinates or focus the window. Never substitute
+an active-window or desktop screenshot if the exact window is unsupported.
 
 ## File manager navigation
 

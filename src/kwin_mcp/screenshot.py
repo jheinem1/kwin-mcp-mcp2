@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import os
 import selectors
 import subprocess
@@ -21,13 +22,15 @@ if TYPE_CHECKING:
 
 _CAPTURE_TIMEOUT = 10.0
 _MAX_CAPTURE_BYTES = 256 * 1024 * 1024
+_MAX_WINDOW_PNG_BYTES = 8 * 1024 * 1024
+_MAX_WINDOW_RAW_BYTES = 64 * 1024 * 1024
 
 
 class UnsupportedCaptureError(RuntimeError):
     """Capture was withheld because compositing is inactive or unverifiable."""
 
 
-def require_active_compositing(dbus_address: str) -> None:
+def require_active_compositing(dbus_address: str, *, owner: str = "org.kde.KWin") -> None:
     """Check the safe active property before asking KWin or Spectacle to capture.
 
     KWin 6.8.2 can accept Wayland/input clients without a render device, then
@@ -40,7 +43,7 @@ def require_active_compositing(dbus_address: str) -> None:
         bus = (
             dbus.bus.BusConnection(dbus_address) if dbus_address else dbus.SessionBus(private=True)
         )
-        proxy = bus.get_object("org.kde.KWin", "/Compositor", introspect=False)
+        proxy = bus.get_object(owner, "/Compositor", introspect=False)
         properties = dbus.Interface(proxy, "org.freedesktop.DBus.Properties")
         active = bool(properties.Get("org.kde.kwin.Compositing", "active", timeout=3.0))
     except Exception as exc:
@@ -89,12 +92,16 @@ def _capture_raw(
     *,
     timeout: float = _CAPTURE_TIMEOUT,
     output_name: str | None = None,
+    window_id: str | None = None,
+    byte_limit: int = _MAX_CAPTURE_BYTES,
 ) -> tuple:
     """Drain concurrently: a compositor may fill the pipe before replying on D-Bus.
 
     The reader owns its descriptor and always closes it. Both D-Bus and pipe
     reads have deadlines, including a writer that never closes its descriptor.
     """
+    if output_name is not None and window_id is not None:
+        raise ValueError("Only one screenshot scope may be selected")
     read_fd, write_fd = os.pipe()
     deadline = time.monotonic() + timeout
     chunks: list[bytes] = []
@@ -113,8 +120,8 @@ def _capture_raw(
                     if not chunk:
                         break
                     total += len(chunk)
-                    if total > _MAX_CAPTURE_BYTES:
-                        raise RuntimeError("KWin screenshot exceeds 256 MiB limit")
+                    if total > byte_limit:
+                        raise RuntimeError("KWin screenshot exceeds capture byte limit")
                     chunks.append(chunk)
         except Exception as exc:
             errors.append(exc)
@@ -129,7 +136,11 @@ def _capture_raw(
         os.close(write_fd)
         raise
     try:
-        if output_name is None:
+        if window_id is not None:
+            results = iface.CaptureWindow(
+                window_id, options, dbus.types.UnixFd(write_fd), timeout=timeout
+            )
+        elif output_name is None:
             results = iface.CaptureActiveScreen(
                 options, dbus.types.UnixFd(write_fd), timeout=timeout
             )
@@ -440,5 +451,55 @@ def capture_output_dbus(
         image = _decode_capture(data, result)
         image.save(output_path, "PNG")
         return output_path
+    finally:
+        bus.close()
+
+
+def capture_window_dbus(dbus_address: str, window_id: str, *, owner: str) -> tuple[dict, bytes]:
+    """Capture only this normal-window UUID on the previously verified bus owner."""
+    target = uuid.UUID(window_id)
+    if not owner.startswith(":"):
+        raise ValueError("An exact compositor bus owner is required")
+    require_active_compositing(dbus_address, owner=owner)
+    bus = dbus.bus.BusConnection(dbus_address)
+    try:
+        current_owner = bus.call_blocking(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "GetNameOwner",
+            "s",
+            ("org.kde.KWin",),
+            timeout=2.0,
+        )
+        if current_owner != owner:
+            raise RuntimeError("KWin owner changed")
+        obj = bus.get_object(owner, "/org/kde/KWin/ScreenShot2", introspect=False)
+        iface = dbus.Interface(obj, "org.kde.KWin.ScreenShot2")
+        data, result = _capture_raw(
+            iface,
+            dbus.Dictionary(
+                {
+                    "include-cursor": dbus.Boolean(False),
+                    "include-decoration": dbus.Boolean(True),
+                    "include-shadow": dbus.Boolean(False),
+                    "native-resolution": dbus.Boolean(True),
+                },
+                signature="sv",
+            ),
+            window_id="{" + str(target) + "}",
+            byte_limit=_MAX_WINDOW_RAW_BYTES,
+            timeout=4.0,
+        )
+        if uuid.UUID(str(result.get("windowId", ""))) != target:
+            raise RuntimeError("KWin did not confirm the requested screenshot window")
+        image = _decode_capture(data, result)
+        if image.mode == "RGBA" and image.getchannel("A").getextrema()[1] == 0:
+            raise RuntimeError("KWin returned a fully transparent window frame")
+        stream = io.BytesIO()
+        image.save(stream, "PNG")
+        if stream.tell() > _MAX_WINDOW_PNG_BYTES:
+            raise RuntimeError("Window PNG exceeds transfer limit")
+        return {"pixel_width": image.width, "pixel_height": image.height}, stream.getvalue()
     finally:
         bus.close()
