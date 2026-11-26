@@ -447,9 +447,10 @@ class AutomationEngine:
                     "root": target.get("wayland_ax_root"),
                     "window_id": target.get("window_id"),
                 }
-                if type(pid) is not int or root_from_binding(
-                    verified, window_id=window_id, pid=pid
-                ) is None:
+                if (
+                    type(pid) is not int
+                    or root_from_binding(verified, window_id=window_id, pid=pid) is None
+                ):
                     raise RuntimeError("Explicit accessibility root is unavailable")
             return target
 

@@ -50,3 +50,27 @@ strip the private-runtime guard or let this auto-enable. A packaged opt-in
 will require a reviewed deployment/rollback path and regression checks across
 runtime updates. Applications that do not publish (including non-Qt or
 unverified sandboxed providers) remain unsupported by this exact path.
+
+## Version-guarded private package and rollback
+
+Build the companion libraries with the matched SDK as above, then use
+`package.py build BUILD/plugins PACKAGE_DIR RELEASE_ID` and
+`package.py install STORE_DIR PACKAGE_DIR`. Use freshly created private
+directories for the package and store. Nothing is loaded unless a release is
+selected and a caller explicitly supplies `AX_PACKAGE_ROOT=STORE_DIR` to the
+private harness. The launcher verifies the exact installed RPM versions for
+KWin, Qt base and Qt Wayland and validates the two installed plugin checksums
+before starting the compositor. A version or checksum mismatch does not
+change the selection. Backend and app permissions remain unchanged.
+
+Use `package.py status STORE_DIR` to inspect the active and prior selections,
+`package.py rollback STORE_DIR` to switch back atomically, or
+`package.py disable STORE_DIR` to clear opt-in. Retained release directories
+are inert with opt-in cleared and contain only the test bundle. No system
+package registration or desktop startup files are changed.
+
+`verify-package.sh` reproduces first install, same-ABI release replacement,
+wrong-version refusal for both components, checksum refusal before launch,
+rollback and full opt-out. It also reruns positive and lock/lifecycle
+conformance from installed plugins, rather than the build directory. All
+runs use fresh private app homes, buses, store and sockets.
