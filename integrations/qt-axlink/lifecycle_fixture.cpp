@@ -2,6 +2,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QLabel>
+#include <QCheckBox>
+#include <QLineEdit>
+#include <QPushButton>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -24,6 +27,21 @@ static Pair makePair(const QString &token, const QString &privateLabel) {
     auto *label = new QLabel(QStringLiteral("Identical content"), p.surface.get());
     label->setAccessibleName(privateLabel);
     layout->addWidget(label);
+    auto *flag = new QCheckBox(QStringLiteral("Verification state"), p.surface.get());
+    auto *press = new QPushButton(QStringLiteral("Toggle verification"), p.surface.get());
+    press->setFocusPolicy(Qt::NoFocus);
+    QObject::connect(press, &QPushButton::clicked, flag, [flag]{ flag->setChecked(!flag->isChecked()); });
+    auto *entry = new QLineEdit(p.surface.get());
+    entry->setAccessibleName(QStringLiteral("Disposable entry"));
+    entry->setAccessibleIdentifier(QStringLiteral("jamesos.ax.single-line.v1"));
+    auto *unmarked = new QLineEdit(p.surface.get());
+    auto *password = new QLineEdit(p.surface.get());
+    password->setEchoMode(QLineEdit::Password);
+    password->setText(QStringLiteral("private-fixture-value"));
+    for (QWidget *control : {static_cast<QWidget *>(press), static_cast<QWidget *>(flag),
+                             static_cast<QWidget *>(entry), static_cast<QWidget *>(unmarked),
+                             static_cast<QWidget *>(password)})
+        layout->addWidget(control);
     p.surface->show();
     p.witness = std::make_unique<QWidget>();
     p.witness->setWindowTitle(QStringLiteral("Qt AX fixture witness ") + token);

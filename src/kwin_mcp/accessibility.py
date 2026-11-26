@@ -18,6 +18,14 @@ import gi
 gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi  # noqa: E402
 
+from kwin_mcp.semantic_actions import (  # noqa: E402
+    BLOCKED_STATES,
+    BUTTON_ROLES,
+    ENTRY_ROLES,
+    PRIVATE_ANCESTORS,
+    report,
+    valid_request,
+)
 from kwin_mcp.window_accessibility import (  # noqa: E402
     MAX_APPLICATIONS,
     MAX_TOP_LEVELS,
@@ -667,6 +675,7 @@ def _snapshot_window_node(
     max_depth: int,
     budget: TraversalBudget,
     include_labels: bool,
+    action_indices: tuple[int, ...] | None = None,
 ) -> dict:
     budget.visited += 1
     role = (node.get_role_name() or "unknown").casefold()[:64]
@@ -678,6 +687,8 @@ def _snapshot_window_node(
         "states": states,
         "children": [],
     }
+    if action_indices:
+        _attach_semantic_ref(node, role, set(states), action_indices, meta)
     # No values, text interfaces or descriptions. Omit the entire subtree of
     # editable/secret/document nodes; names may themselves contain contents.
     if role in _WINDOW_PRIVATE_ROLES or "editable" in states or "protected" in states:
@@ -707,6 +718,7 @@ def _snapshot_window_node(
                 max_depth=max_depth,
                 budget=budget,
                 include_labels=include_labels,
+                action_indices=(*action_indices, i) if action_indices is not None else None,
             )
         )
     return meta
@@ -718,6 +730,7 @@ def get_window_accessibility(
     max_depth: int,
     max_nodes: int,
     include_labels: bool,
+    include_action_handles: bool = False,
 ) -> dict:
     """Resolve an exact accessible top-level and inspect only its read-only subtree."""
     match = _resolve_exact_window(target)
@@ -726,7 +739,14 @@ def get_window_accessibility(
     window, method = match
     budget = TraversalBudget(max_nodes)
     tree = _snapshot_window_node(
-        window, depth=0, max_depth=max_depth, budget=budget, include_labels=include_labels
+        window,
+        depth=0,
+        max_depth=max_depth,
+        budget=budget,
+        include_labels=include_labels,
+        action_indices=()
+        if include_action_handles and method == "compositor_registered_qt_root"
+        else None,
     )
     afterward = _resolve_exact_window(target)
     if afterward is None or afterward[0] != window or afterward[1] != method:
@@ -739,6 +759,236 @@ def get_window_accessibility(
         "truncated": budget.truncated,
         "tree": tree,
     }
+
+
+def _semantic_state(node) -> tuple[str, set[str]]:
+    node.clear_cache()
+    role = (node.get_role_name() or "").casefold()
+    states = node.get_state_set()
+    return role, {state.value_nick for state in Atspi.StateType if states.contains(state)}
+
+
+def _semantic_ref(node, role, indices):
+    return {
+        "root_path_indices": list(indices),
+        "path": node.path,
+        "owner": node.app.bus_name,
+        "role": role,
+    }
+
+
+def _eligible_semantic_entry(node, role, states) -> bool:
+    if (
+        role not in ENTRY_ROLES
+        or "editable" not in states
+        or "multi-line" in states
+        or states & BLOCKED_STATES
+    ):
+        return False
+    if "single-line" in states:
+        return True
+    # Qt 6.11's Linux bridge does not export the SingleLine state. A cooperating
+    # app can explicitly opt in this exact field instead of guessing its class.
+    return node.get_accessible_id() == "jamesos.ax.single-line.v1"
+
+
+def _attach_semantic_ref(node, role, states, indices, meta):
+    if role in PRIVATE_ANCESTORS or states & BLOCKED_STATES:
+        return
+    allowed = []
+    if role in BUTTON_ROLES:
+        allowed.append("press")
+    if _eligible_semantic_entry(node, role, states):
+        allowed.append("set_text")
+    if not allowed and (role in _WINDOW_PRIVATE_ROLES or "editable" in states):
+        return
+    descriptor = _semantic_ref(node, role, indices)
+    if isinstance(descriptor["path"], str) and isinstance(descriptor["owner"], str):
+        meta["_action_ref"] = {**descriptor, "actions": allowed}
+
+
+def _find_bound_node(root, ref):
+    if not isinstance(ref, dict):
+        return None
+    indices = ref.get("root_path_indices")
+    if not isinstance(indices, list) or not 1 <= len(indices) <= 12:
+        return None
+    owner = root.app.bus_name
+    if ref.get("owner") != owner:
+        return None
+    node = root
+    for index in indices:
+        role, states = _semantic_state(node)
+        if (
+            role in PRIVATE_ANCESTORS
+            or role in ENTRY_ROLES
+            or "editable" in states
+            or states & BLOCKED_STATES
+            or type(index) is not int
+            or not 0 <= index < min(node.get_child_count(), 1000)
+        ):
+            return None
+        parent, node = node, node.get_child_at_index(index)
+        if node is None or node.app.bus_name != owner or node.get_parent() != parent:
+            return None
+    role, states = _semantic_state(node)
+    if (
+        node.path != ref.get("path")
+        or role != ref.get("role")
+        or role in PRIVATE_ANCESTORS
+        or states & BLOCKED_STATES
+    ):
+        return None
+    return node, role, states
+
+
+def _private_stage_unlocked() -> bool:
+    # A disposable compositor normally has no locker service. If it does, an
+    # active or unverifiable locker blocks semantic dispatch.
+    import os
+
+    import dbus
+
+    from kwin_mcp.ax_link import explicit_test_runtime_requested
+
+    if not explicit_test_runtime_requested(dict(os.environ)):
+        return False
+    try:
+        bus = dbus.SessionBus(private=True)
+        try:
+            if not bus.name_has_owner("org.freedesktop.ScreenSaver"):
+                return True
+            owner = bus.get_name_owner("org.freedesktop.ScreenSaver")
+            saver = dbus.Interface(
+                bus.get_object(owner, "/ScreenSaver", introspect=False),
+                "org.freedesktop.ScreenSaver",
+            )
+            return not bool(saver.GetActive(timeout=0.5))
+        finally:
+            bus.close()
+    except (dbus.DBusException, OSError):
+        return False
+
+
+def run_window_semantic_action(request: dict) -> dict:
+    def refused(reason: str) -> dict:
+        return report("refused", False, reason)
+
+    action, text = request.get("action"), request.get("text")
+    state, present = request.get("verify_state"), request.get("verify_present")
+    verify = request.get("verify_ref")
+    target = request.get("target")
+    if (
+        not valid_request(
+            action, text, "approved" if isinstance(verify, dict) else None, state, present
+        )
+        or not isinstance(target, dict)
+        or not _private_stage_unlocked()
+    ):
+        return refused("Staging, lock, or action eligibility could not be established")
+    root = _resolve_registered_root(target)
+    if root is None:
+        return refused("Compositor-registered accessibility root is unavailable")
+    bound = _find_bound_node(root, request.get("element_ref"))
+    if bound is None:
+        return refused("Snapshot element identity changed")
+    node, role, states = bound
+    if not {"enabled", "sensitive", "showing", "visible"}.issubset(states):
+        return refused("Snapshot element is not enabled and visible")
+
+    if action == "press":
+        observer = _find_bound_node(root, verify)
+        if observer is None or ("editable" in observer[2] or observer[1] in _WINDOW_PRIVATE_ROLES):
+            return refused("Observable verification target changed or is private")
+        if (state in observer[2]) is present:
+            return refused("Verification condition was already satisfied before dispatch")
+        interface = node.get_action_iface() if role in BUTTON_ROLES else None
+        if interface is None or not 0 <= interface.get_n_actions() <= 12:
+            return refused("No supported button action")
+        # Qt normalizes these action names to press/toggle. No name, index,
+        # focus, coordinates or generic invoke fallback from the caller.
+        candidates = [
+            i
+            for i in range(interface.get_n_actions())
+            if interface.get_action_name(i).casefold() in {"press", "click", "toggle"}
+        ]
+        if len(candidates) != 1:
+            return refused("No unique semantic button action")
+
+        def dispatch():
+            return interface.do_action(candidates[0])
+
+        def observed():
+            got = _find_bound_node(root, verify)
+            return got is not None and (state in got[2]) is present
+    else:
+        if not isinstance(text, str) or not _eligible_semantic_entry(node, role, states):
+            return refused("Only non-private single-line edit fields are supported")
+        interface = node.get_editable_text_iface()
+        if interface is None or node.get_text_iface() is None or node.get_character_count() != 0:
+            return refused("Only initially empty edit fields are supported")
+
+        def dispatch():
+            return interface.set_text_contents(text)
+
+        def observed():
+            got = _find_bound_node(root, request.get("element_ref"))
+            if got is None or not _eligible_semantic_entry(*got):
+                return False
+            candidate = got[0]
+            return (
+                candidate.get_character_count() in {len(text), len(text.encode("utf-16-le")) // 2}
+                and Atspi.Text.get_text(candidate, 0, -1) == text
+            )
+
+    import os
+
+    from kwin_mcp.windows import run_window_operation
+
+    def compositor_binding_matches() -> bool:
+        try:
+            return (
+                run_window_operation(
+                    "atspi_explicit_target",
+                    window_id=target["window_id"],
+                    env=dict(os.environ),
+                    timeout=2,
+                )
+                == target
+            )
+        except (RuntimeError, ValueError, OSError, KeyError):
+            return False
+
+    if (
+        not compositor_binding_matches()
+        or not _private_stage_unlocked()
+        or _resolve_registered_root(target) != root
+    ):
+        return refused("Selected root or unlocked staging session changed before dispatch")
+    latest = _find_bound_node(root, request.get("element_ref"))
+    if latest is None or latest[0] != node or latest[2] != states or not _private_stage_unlocked():
+        return refused("Snapshot target changed before dispatch")
+    if action == "press":
+        prior = _find_bound_node(root, verify)
+        if prior is None or (state in prior[2]) is present:
+            return refused("Verification condition changed before dispatch")
+    elif not _eligible_semantic_entry(*latest) or node.get_character_count() != 0:
+        return refused("Edit field changed before dispatch")
+    did_send = None
+    try:
+        accepted = dispatch()
+        if not accepted:
+            return report("unverified", None, "Provider did not confirm dispatch")
+        did_send = True
+        for _ in range(6):
+            if not _private_stage_unlocked() or _resolve_registered_root(target) != root:
+                break
+            if observed() and compositor_binding_matches() and _private_stage_unlocked():
+                return report("verified", True, "Effect observed in the registered root")
+            time.sleep(0.05)
+    except Exception:
+        pass
+    return report("unverified", did_send, "Effect could not be verified; inspect without retrying")
 
 
 # ── CLI entrypoint for subprocess execution ──────────────────────────────
@@ -780,11 +1030,15 @@ def _handle_request(request: dict) -> dict:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "result": [asdict(e) for e in elements]}
 
+    if op == "window_semantic_action":
+        return {"ok": True, "result": json.dumps(run_window_semantic_action(request))}
+
     if op == "window_accessibility":
         target = request.get("target")
         max_depth = request.get("max_depth")
         max_nodes = request.get("max_nodes")
         include_labels = request.get("include_labels")
+        include_handles = request.get("include_action_handles", False)
         if (
             not isinstance(target, dict)
             or type(max_depth) is not int
@@ -792,10 +1046,15 @@ def _handle_request(request: dict) -> dict:
             or type(max_nodes) is not int
             or not 1 <= max_nodes <= 200
             or type(include_labels) is not bool
+            or type(include_handles) is not bool
         ):
             return {"ok": False, "error": "Invalid bounded window accessibility request"}
         result = get_window_accessibility(
-            target, max_depth=max_depth, max_nodes=max_nodes, include_labels=include_labels
+            target,
+            max_depth=max_depth,
+            max_nodes=max_nodes,
+            include_labels=include_labels,
+            include_action_handles=include_handles,
         )
         return {"ok": True, "result": json.dumps(result)}
 

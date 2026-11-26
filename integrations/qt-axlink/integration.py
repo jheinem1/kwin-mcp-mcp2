@@ -13,9 +13,11 @@ import dbus
 b=pathlib.Path(os.environ["AX_WORK"])
 s=pathlib.Path(os.environ["AX_STAGE"])
 mode=sys.argv[1]
-test_lock = mode == 'lock'
+test_lock = mode in {'lock','semantic-lock'}
+semantic = mode in {'semantic','semantic-lock'}
 no_publisher = mode == 'no-publisher'
-if test_lock or no_publisher: mode = 'kate'
+if semantic: mode = 'fixture'
+elif test_lock or no_publisher: mode = 'kate'
 assert s.parent==pathlib.Path('/tmp') and s.name.startswith('kax-')
 assert os.environ["HOME"]==str(s/"home") and os.environ["XDG_RUNTIME_DIR"]==str(s/"r")
 assert not os.environ["DBUS_SESSION_BUS_ADDRESS"].startswith("unix:path=/run/user/")
@@ -205,6 +207,109 @@ try:
         # The independent native close test below is the identity oracle.
     print(f'{mode.upper()} PASS: identical title and size, exact distinct accessible roots, external direct D-Bus caller denied',flush=True)
     print(f'{mode.upper()} CONTEXT: {len({ar["pid"],dr["pid"]})} owning process(es)',flush=True)
+    if semantic:
+        import contextlib
+        import io
+        from kwin_mcp.cli import KwinMcpShell
+
+        shell=KwinMcpShell(engine)
+        def cli(command, **args):
+            buffer=io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                shell.onecmd(command+" "+json.dumps(args))
+            return json.loads(buffer.getvalue().split("\n",1)[1])
+        def find(tree, role):
+            if tree["role"] == role: return tree
+            return next((x for c in tree["children"] if (x:=find(c,role)) is not None),None)
+        def nodes(tree):
+            yield tree
+            for c in tree["children"]:
+                yield from nodes(c)
+        def marked_entry(tree):
+            entries=[x for x in nodes(tree) if x["role"] in {"text","entry"}]
+            eligible=[x for x in entries if "set_text" in x.get("semantic_actions",[])]
+            assert len(entries)==2
+            assert len(eligible)==1
+            assert all(not x.get("action_handle") for x in entries if x is not eligible[0])
+            return eligible[0]
+        def snap(w):
+            return cli("window_accessibility",window_id=w,include_action_handles=True)["tree"]
+        def observer():
+            old=windows._script
+            def js(*args,**kwargs):
+                return old(*args,**kwargs).splitlines()[0]+"""
+(function () {
+const p=workspace.cursorPos;
+const w=workspace.activeWindow;
+callDBus(request.destination,"/org/kwin_mcp/Result","org.kwin_mcp.Result","Complete",
+ JSON.stringify({ok:true,result:{pointer:[p.x,p.y],active:w?String(w.internalId):null}}));
+})();
+"""
+            windows._script=js
+            try:
+                with tempfile.TemporaryDirectory(dir=s) as scratch:
+                    out=windows._execute({"op":"list","window_id":"","timeout":3,
+                                           "script_path":str(pathlib.Path(scratch)/"reader.js")})
+                    assert out["ok"]
+                    return out["result"]
+            finally:
+                windows._script=old
+        state=observer()
+        ids=[w["window_id"] for w in (a,d)]
+        active=(state["active"] or "").strip("{}").lower()
+        target_id=next(x for x in ids if x!=active)
+        twin_id=next(x for x in ids if x!=target_id)
+        target=snap(target_id)
+        button=(find(target,"push button") or find(target,"button"))
+        check=find(target,"check box")
+        secret=find(target,"password text")
+        assert button and check and secret
+        assert "press" in button.get("semantic_actions",[]),button
+        assert secret.get("redacted") and not secret.get("action_handle")
+        assert "private-fixture-value" not in json.dumps(target)
+        args=dict(window_id=target_id,action_handle=button["action_handle"],action="press",
+                  verify_handle=check["action_handle"],verify_state="checked",verify_present=True)
+        if test_lock:
+            lock="org.freedesktop.ScreenSaver"
+            owner=until(lambda:bus.get_name_owner(lock) if bus.name_has_owner(lock) else None,
+                        "private locker missing")
+            assert owner==bus.get_name_owner("org.kde.KWin")
+            locker=dbus.Interface(bus.get_object(owner,"/ScreenSaver",introspect=False),lock)
+            locker.Lock(timeout=2)
+            until(lambda:locker.GetActive(timeout=2),"private compositor failed to lock")
+            assert cli("window_semantic_action",**args)["dispatched"] is False
+            print("SEMANTIC PRIVATE LOCK PASS: semantic action refused before dispatch")
+            sys.exit(0)
+        wrong=cli("window_semantic_action",**{**args,"window_id":twin_id})
+        assert wrong["status"]=="refused" and wrong["dispatched"] is False
+        result=cli("window_semantic_action",**args)
+        assert result["status"]=="verified",result
+        assert cli("window_semantic_action",**args)["status"]=="refused"
+        print("SEMANTIC BUTTON PASS: background state changed only in the exact owned window",flush=True)
+        target=snap(target_id)
+        twin=snap(twin_id)
+        assert "checked" in find(target,"check box")["states"]
+        assert "checked" not in find(twin,"check box")["states"]
+        assert (find(target,"push button") or find(target,"button"))["action_key"]==button["action_key"]
+        entry=marked_entry(target)
+        typed=dict(window_id=target_id,action_handle=entry["action_handle"],
+                   action="set_text",text="Owned fixture: Tea ☕")
+        result=cli("window_semantic_action",**typed)
+        assert result["status"]=="verified" and typed["text"] not in json.dumps(result),result
+        target=snap(target_id)
+        entry=marked_entry(target)
+        assert cli("window_semantic_action",**{**typed,"action_handle":entry["action_handle"]})["status"]=="refused"
+        twin_entry=marked_entry(twin)
+        assert twin_entry["action_key"]!=entry["action_key"]
+        sibling=cli("window_semantic_action",window_id=twin_id,
+                    action_handle=twin_entry["action_handle"], action="set_text",
+                    text="Separate owned twin")
+        assert sibling["status"]=="verified",sibling
+        assert observer()==state,"Focus/cursor changed during semantic actions"
+        print("SEMANTIC CLI PASS: exact background button effect and write to empty entry, "
+              "wrong window/replay/nonempty/secret guards, active UUID and pointer unchanged")
+        sys.exit(0)
+
     if test_lock:
         lock_name='org.freedesktop.ScreenSaver'
         owner=until(lambda:bus.get_name_owner(lock_name) if bus.name_has_owner(lock_name) else None,

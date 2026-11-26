@@ -233,7 +233,7 @@ kwin-mcp-cli --default-live-session
 | `clipboard_get` | _(none)_ | Read the current clipboard text content. Requires `enable_clipboard=true` in `session_start` and `wl-clipboard` installed. |
 | `clipboard_set` | `text` `str` | Set the clipboard text content. Same requirements as `clipboard_get`. |
 
-### Window Management (6 tools)
+### Window Management (7 tools)
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
@@ -242,13 +242,17 @@ kwin-mcp-cli --default-live-session
 | `focus_window` | `app_name` `str` | Focus a window by application name (case-insensitive match) |
 | `kwin_windows` | _(none)_ | List exact compositor window UUIDs, geometry, state and logical outputs. Labels are untrusted. |
 | `activate_window` | `window_id` `str` | Request focus by exact UUID; distinguish dispatch from observed activation. In live mode this can change focus. |
-| `window_accessibility` | `window_id` `str`, `max_depth?` `int`, `max_nodes?` `int`, `include_labels?` `bool` | Inspect one verified window through AT-SPI without focusing it. Bounded metadata; labels opt-in, no text values, ambiguous mappings refused. |
+| `window_accessibility` | `window_id` `str`, `max_depth?` `int`, `max_nodes?` `int`, `include_labels?` `bool`, `include_action_handles?` `bool` | Inspect one verified window through AT-SPI without focusing it. Bounded metadata; labels opt-in, no text values, ambiguous mappings refused. |
+| `window_semantic_action` | `window_id`, `action_handle`, `action`, optional verification or entry arguments | Verify one exact staged button press or fill one empty eligible edit field. No live support. |
 
 A successful `window_accessibility` returns an exact PID/title match or, for
 same-title GTK 3 windows, a complete unique match of exact client sizes. Equal
 sizes, other duplicate-title toolkits, inaccessible applications and locked or
 unverifiable live sessions are unsupported. Snapshot indices are for reading,
 not persistent element handles. There is no screenshot or input fallback.
+
+The private, compositor-registered Qt staging runtime can opt into short-lived
+semantic handles. See [action contract and limits](docs/EXACT_SEMANTIC_ACTIONS.md).
 
 ### UI Polling (1 tool)
 

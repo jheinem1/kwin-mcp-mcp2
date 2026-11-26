@@ -74,3 +74,8 @@ wrong-version refusal for both components, checksum refusal before launch,
 rollback and full opt-out. It also reruns positive and lock/lifecycle
 conformance from installed plugins, rather than the build directory. All
 runs use fresh private app homes, buses, store and sockets.
+
+The `semantic` and `semantic-lock` modes of `private.sh` cover the optional
+private exact-window [semantic actions](../../docs/EXACT_SEMANTIC_ACTIONS.md).
+Build the fixture with `compile.sh fixture` before running them. These modes
+use a private compositor and disposable Qt widgets only.
