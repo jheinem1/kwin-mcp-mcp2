@@ -26,3 +26,6 @@ unverified writes, and verification failure stop the batch. Receipts
 identify completed and uncertain steps; already verified effects are not
 undone. There are no automatic write retries. A deadline stops new effects
 but does not undo an in-flight effect.
+
+For the exact-window batch conformance case, run `private.sh scoped` with the
+same disposable Qt fixture used by `private.sh semantic`.
