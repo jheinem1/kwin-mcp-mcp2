@@ -21,7 +21,7 @@ state change and text entry verifies the exact value internally. The
 batch does not return entered text.
 
 Invalid syntax rejects the entire plan before dispatch. Missing, stale,
-duplicated or redacted identities, the wrong window, a lock, refused or
+duplicated or protected identities, the wrong window, a lock, refused or
 unverified writes, and verification failure stop the batch. Receipts
 identify completed and uncertain steps; already verified effects are not
 undone. There are no automatic write retries. A deadline stops new effects

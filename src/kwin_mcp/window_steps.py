@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 MAX_STEPS = 5
 MAX_SECONDS = 30.0
 _MAX_KEY = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
+_WRITE_HANDLE = re.compile(r"[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{24}\Z")
 _SUPPORTED_STATES = frozenset(
     {"checked", "expanded", "indeterminate", "pressed", "selected", "showing", "visible"}
 )
@@ -33,6 +34,12 @@ class Step:
 def _key(value: object) -> str:
     if not isinstance(value, str) or not _MAX_KEY.fullmatch(value):
         raise ValueError("Expected an opaque key from an exact-window action snapshot")
+    return value
+
+
+def _handle(value: object) -> str:
+    if not isinstance(value, str) or not _WRITE_HANDLE.fullmatch(value):
+        raise ValueError("Expected a one-shot handle from the fresh snapshot")
     return value
 
 
@@ -92,9 +99,21 @@ def _snapshot_nodes(snapshot: object, window_id: str) -> dict[str, dict]:
         if not isinstance(children, list) or len(children) > 200:
             raise ValueError("Unverifiable accessibility snapshot children")
         stack.extend(children)
-        # A redacted node is never rebound by a batch.
-        if node.get("redacted") or "action_key" not in node:
+        # Eligible non-secret entries are still redacted in the snapshot to
+        # hide their contents. Only the primitive may read/verify those values.
+        if "action_key" not in node:
             continue
+        if node.get("redacted"):
+            states, actions = node.get("states"), node.get("semantic_actions")
+            if (
+                node.get("role") not in {"text", "entry"}
+                or not isinstance(states, list)
+                or "editable" not in states
+                or "protected" in states
+                or not isinstance(actions, list)
+                or "set_text" not in actions
+            ):
+                continue
         key = _key(node["action_key"])
         if key in matches:
             raise ValueError("Duplicate element key")
@@ -143,7 +162,7 @@ def run_window_steps(
                     return finish("stopped")
                 entry.update(status="verified")
                 continue
-            handle = _key(node.get("action_handle"))
+            handle = _handle(node.get("action_handle"))
             kwargs: dict[str, Any] = {}
             if step.op == "set_text":
                 kwargs["text"] = step.text
@@ -153,7 +172,7 @@ def run_window_steps(
                     raise ValueError("Verification element key is absent")
                 verify = nodes[verify_key]
                 kwargs.update(
-                    verify_handle=_key(verify.get("action_handle")),
+                    verify_handle=_handle(verify.get("action_handle")),
                     verify_state=step.state,
                     verify_present=step.present,
                 )
